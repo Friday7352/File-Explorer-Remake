@@ -19,7 +19,9 @@ public sealed class NavigationService
 
     public bool CanGoForward => _index >= 0 && _index < _history.Count - 1;
 
-    public bool CanGoUp => CurrentPath is not null && Directory.GetParent(CurrentPath) is not null;
+    public bool CanGoUp => CurrentPath is not null &&
+                           !CurrentPath.StartsWith("clearspace://", StringComparison.OrdinalIgnoreCase) &&
+                           Directory.GetParent(CurrentPath) is not null;
 
     public void Navigate(string path)
     {
@@ -57,7 +59,7 @@ public sealed class NavigationService
 
     public void GoUp()
     {
-        if (CurrentPath is null) return;
+        if (CurrentPath is null || CurrentPath.StartsWith("clearspace://", StringComparison.OrdinalIgnoreCase)) return;
         var parent = Directory.GetParent(CurrentPath);
         if (parent is not null)
             Navigate(parent.FullName);

@@ -5,6 +5,10 @@ namespace Clearspace;
 
 public partial class App : Application
 {
+    private static readonly object ErrorLock = new();
+    private static string? _lastErrorSignature;
+    private static DateTime _lastErrorAt;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -42,6 +46,19 @@ public partial class App : Application
         var detail = exception is AggregateException aggregate
             ? aggregate.Flatten().InnerException ?? aggregate
             : exception;
+
+        // A layout exception can be raised by several queued WPF measure passes.
+        // One dialog is useful; a stack of identical dialogs is not.
+        var signature = $"{detail.GetType().FullName}|{detail.Message}";
+        lock (ErrorLock)
+        {
+            var now = DateTime.UtcNow;
+            if (signature == _lastErrorSignature && now - _lastErrorAt < TimeSpan.FromSeconds(5))
+                return;
+
+            _lastErrorSignature = signature;
+            _lastErrorAt = now;
+        }
 
         MessageBox.Show(
             $"{detail.GetType().Name}\n\n{detail.Message}\n\n{detail.StackTrace}",

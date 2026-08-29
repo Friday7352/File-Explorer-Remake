@@ -1,313 +1,637 @@
 <Window x:Class="Clearspace.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:vm="clr-namespace:Clearspace.ViewModels"
         Title="Clearspace"
-        Height="780" Width="1240"
-        MinHeight="480" MinWidth="820"
+        Height="800" Width="1280"
+        MinHeight="500" MinWidth="860"
         WindowStartupLocation="CenterScreen"
-        Background="{StaticResource Surface}"
-        Foreground="{StaticResource Text}"
-        FontFamily="Segoe UI Variable Text, Segoe UI"
+        Background="{StaticResource Base}"
+        Foreground="{StaticResource Ink}"
+        FontFamily="{StaticResource UIFont}"
         FontSize="12.5"
         UseLayoutRounding="True"
-        TextOptions.TextFormattingMode="Display">
+        SnapsToDevicePixels="True"
+        TextOptions.TextFormattingMode="Display"
+        TextOptions.TextRenderingMode="ClearType">
+
+    <Window.Resources>
+
+        <!-- Details columns, swapped out wholesale when tiles are active. -->
+        <GridView x:Key="DetailsView" x:Shared="False" ColumnHeaderContainerStyle="{StaticResource ColumnHeader}">
+            <GridViewColumn Width="400" Header="Name">
+                <GridViewColumn.CellTemplate>
+                    <DataTemplate>
+                        <StackPanel Orientation="Horizontal">
+                            <Image Source="{Binding Icon}"
+                                   Width="16" Height="16"
+                                   Margin="6,0,11,0"
+                                   RenderOptions.BitmapScalingMode="HighQuality" />
+                            <TextBlock Text="{Binding Name}"
+                                       FontFamily="{StaticResource SerifFont}"
+                                       FontSize="13"
+                                       VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis" />
+                        </StackPanel>
+                    </DataTemplate>
+                </GridViewColumn.CellTemplate>
+            </GridViewColumn>
+
+            <GridViewColumn Width="180" Header="Date modified">
+                <GridViewColumn.CellTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding DateModifiedText}"
+                                   Foreground="{StaticResource InkMuted}"
+                                   Margin="10,0,0,0"
+                                   VerticalAlignment="Center"
+                                   Typography.NumeralAlignment="Tabular" />
+                    </DataTemplate>
+                </GridViewColumn.CellTemplate>
+            </GridViewColumn>
+
+            <GridViewColumn Width="160" Header="Type">
+                <GridViewColumn.CellTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding TypeName}"
+                                   Foreground="{StaticResource InkMuted}"
+                                   Margin="10,0,0,0"
+                                   VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis" />
+                    </DataTemplate>
+                </GridViewColumn.CellTemplate>
+            </GridViewColumn>
+
+            <GridViewColumn Width="110" Header="Size">
+                <GridViewColumn.CellTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding SizeText}"
+                                   Foreground="{StaticResource InkMuted}"
+                                   Margin="0,0,14,0"
+                                   HorizontalAlignment="Right"
+                                   VerticalAlignment="Center"
+                                   Typography.NumeralAlignment="Tabular" />
+                    </DataTemplate>
+                </GridViewColumn.CellTemplate>
+            </GridViewColumn>
+        </GridView>
+
+        <!-- Tile. DataContextChanged, not Loaded: containers are recycled during
+             virtualisation, so the item changes without the visual reloading. -->
+        <DataTemplate x:Key="TileTemplate">
+            <Grid Margin="6,10"
+                  Loaded="OnTileLoaded"
+                  DataContextChanged="OnTileDataContextChanged">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="{Binding DataContext.TilePreviewAreaHeight, RelativeSource={RelativeSource AncestorType={x:Type ListView}}}" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Border Grid.Row="0" Background="#14000000" CornerRadius="7">
+                    <Image Source="{Binding GridImage}"
+                           Width="{Binding DataContext.TilePreviewSize, RelativeSource={RelativeSource AncestorType={x:Type ListView}}}"
+                           Height="{Binding DataContext.TilePreviewSize, RelativeSource={RelativeSource AncestorType={x:Type ListView}}}"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"
+                           Stretch="Uniform"
+                           Margin="4"
+                           RenderOptions.BitmapScalingMode="HighQuality" />
+                </Border>
+
+                <TextBlock Grid.Row="1"
+                           Text="{Binding Name}"
+                           FontFamily="{StaticResource SerifFont}"
+                           FontSize="12"
+                           Margin="2,8,2,0"
+                           MaxHeight="34"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap"
+                           TextTrimming="CharacterEllipsis"
+                           Foreground="{StaticResource Ink}" />
+
+                <StackPanel Grid.Row="2"
+                            Margin="4,2,4,1"
+                            Visibility="{Binding IsDriveRoot, Converter={StaticResource BoolToVisible}}">
+                    <ProgressBar Style="{StaticResource DriveUsageBar}"
+                                 Minimum="0"
+                                 Maximum="100"
+                                 Value="{Binding DriveUsagePercent, Mode=OneWay}"
+                                 Foreground="{Binding DriveUsageBrush}" />
+                    <TextBlock Text="{Binding SizeText}"
+                               Margin="0,5,0,0"
+                               FontSize="9.5"
+                               TextAlignment="Center"
+                               Foreground="{StaticResource InkMuted}"
+                               TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+            </Grid>
+        </DataTemplate>
+
+    </Window.Resources>
 
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- Toolbar -->
-        <Border Grid.Row="0"
-                Background="{StaticResource SurfaceRaised}"
-                BorderBrush="{StaticResource BorderBrush}"
-                BorderThickness="0,0,0,1"
-                Padding="8,7">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
+        <!-- ===== Toolbar ===== -->
+        <Grid Grid.Row="0" Margin="10,10,14,8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
 
-                <StackPanel Grid.Column="0" Orientation="Horizontal">
-                    <Button Style="{StaticResource ToolButton}" Content="&#xE72B;"
-                            Command="{Binding BackCommand}" ToolTip="Back (Alt+Left)" />
-                    <Button Style="{StaticResource ToolButton}" Content="&#xE72A;"
-                            Command="{Binding ForwardCommand}" ToolTip="Forward (Alt+Right)" />
-                    <Button Style="{StaticResource ToolButton}" Content="&#xE74A;"
-                            Command="{Binding UpCommand}" ToolTip="Up (Alt+Up)" />
-                    <Button Style="{StaticResource ToolButton}" Content="&#xE72C;"
-                            Command="{Binding RefreshCommand}" ToolTip="Refresh (F5)" />
+            <StackPanel Grid.Column="0" Orientation="Horizontal">
+                <Button Style="{StaticResource IconButton}" Content="&#xE72B;"
+                        Command="{Binding BackCommand}" ToolTip="Back  ·  Alt+Left" />
+                <Button Style="{StaticResource IconButton}" Content="&#xE72A;"
+                        Command="{Binding ForwardCommand}" ToolTip="Forward  ·  Alt+Right" />
+                <Button Style="{StaticResource IconButton}" Content="&#xE74A;"
+                        Command="{Binding UpCommand}" ToolTip="Up  ·  Alt+Up" />
+                <Button Style="{StaticResource IconButton}" Content="&#xE72C;"
+                        Command="{Binding RefreshCommand}" ToolTip="Refresh  ·  F5" />
+            </StackPanel>
+
+            <Border x:Name="AddressPill"
+                    Grid.Column="1"
+                    Background="{StaticResource Surface}"
+                    BorderBrush="{StaticResource Line}"
+                    BorderThickness="1"
+                    CornerRadius="9"
+                    Margin="10,0"
+                    Height="32">
+                <Grid>
+                    <ItemsControl x:Name="BreadcrumbBar"
+                                  ItemsSource="{Binding Breadcrumbs}"
+                                  VerticalAlignment="Center"
+                                  Margin="3,0">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal">
+                                    <Button Style="{StaticResource CrumbButton}"
+                                            Content="{Binding Name}"
+                                            Tag="{Binding Path}"
+                                            Click="OnBreadcrumbClick" />
+                                    <TextBlock Text="&#xE76C;"
+                                               FontFamily="{StaticResource IconFont}"
+                                               FontSize="8"
+                                               VerticalAlignment="Center"
+                                               Foreground="{StaticResource InkDisabled}" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <TextBox x:Name="AddressBox"
+                             Style="{StaticResource PlainTextBox}"
+                             Text="{Binding AddressText, UpdateSourceTrigger=PropertyChanged}"
+                             Padding="11,0"
+                             Visibility="Collapsed"
+                             KeyDown="OnAddressKeyDown"
+                             LostFocus="OnAddressLostFocus" />
+
+                    <Border x:Name="AddressActivator"
+                            Background="Transparent"
+                            Panel.ZIndex="-1"
+                            MouseLeftButtonDown="OnAddressActivate" />
+                </Grid>
+            </Border>
+
+            <StackPanel Grid.Column="2" Orientation="Horizontal">
+                <StackPanel Orientation="Horizontal" Margin="0,0,7,0"
+                            Visibility="{Binding IsGrid, Converter={StaticResource BoolToVisible}}">
+                    <Button Style="{StaticResource IconButton}" Content="&#xE71F;"
+                            Click="OnZoomOut" ToolTip="Smaller tiles  ·  Ctrl+mouse wheel" />
+                    <TextBlock Text="{Binding TileZoomText}"
+                               Width="42"
+                               VerticalAlignment="Center"
+                               TextAlignment="Center"
+                               FontSize="10.5"
+                               Foreground="{StaticResource InkMuted}" />
+                    <Button Style="{StaticResource IconButton}" Content="&#xE710;"
+                            Click="OnZoomIn" ToolTip="Larger tiles  ·  Ctrl+mouse wheel" />
                 </StackPanel>
+                <Button x:Name="LayoutButton"
+                        Click="OnToggleLayout"
+                        ToolTip="Switch between details and tiles  ·  Ctrl+Shift+V">
+                    <Button.Style>
+                        <Style TargetType="Button" BasedOn="{StaticResource IconButton}">
+                            <Setter Property="Content" Value="&#xE8FD;" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsGrid}" Value="True">
+                                    <Setter Property="Content" Value="&#xE8A9;" />
+                                    <Setter Property="Foreground" Value="{StaticResource Accent}" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Button.Style>
+                </Button>
+                <Button Style="{StaticResource IconButton}" Content="&#xE8F4;"
+                        Command="{Binding NewFolderCommand}" ToolTip="New folder  ·  Ctrl+Shift+N" />
+                <Button Style="{StaticResource IconButton}" Content="&#xE756;"
+                        Command="{Binding TerminalCommand}" ToolTip="Open in Terminal  ·  Ctrl+`" />
+                <ToggleButton Style="{StaticResource IconToggle}"
+                              Content="&#xE7B3;"
+                              IsChecked="{Binding ShowHiddenItems}"
+                              ToolTip="Show hidden items" />
+            </StackPanel>
+        </Grid>
 
-                <Border Grid.Column="1"
-                        Background="{StaticResource SurfaceSunken}"
-                        BorderBrush="{StaticResource BorderBrush}"
-                        BorderThickness="1"
-                        CornerRadius="5"
-                        Margin="10,0"
-                        Height="30">
-                    <Grid>
-                        <!-- Breadcrumb view, swapped for the editable box on focus. -->
-                        <ItemsControl x:Name="BreadcrumbBar"
-                                      ItemsSource="{Binding Breadcrumbs}"
-                                      VerticalAlignment="Center"
-                                      Margin="2,0">
-                            <ItemsControl.ItemsPanel>
-                                <ItemsPanelTemplate>
-                                    <StackPanel Orientation="Horizontal" />
-                                </ItemsPanelTemplate>
-                            </ItemsControl.ItemsPanel>
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <StackPanel Orientation="Horizontal">
-                                        <Button Style="{StaticResource CrumbButton}"
-                                                Content="{Binding Name}"
-                                                Tag="{Binding Path}"
-                                                Click="OnBreadcrumbClick" />
-                                        <TextBlock Text="&#xE76C;"
-                                                   FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
-                                                   FontSize="9"
-                                                   VerticalAlignment="Center"
-                                                   Foreground="{StaticResource TextMuted}" />
-                                    </StackPanel>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-
-                        <TextBox x:Name="AddressBox"
-                                 Text="{Binding AddressText, UpdateSourceTrigger=PropertyChanged}"
-                                 Background="Transparent"
-                                 Foreground="{StaticResource Text}"
-                                 CaretBrush="{StaticResource Text}"
-                                 BorderThickness="0"
-                                 Padding="8,0"
-                                 VerticalContentAlignment="Center"
-                                 Visibility="Collapsed"
-                                 KeyDown="OnAddressKeyDown"
-                                 LostFocus="OnAddressLostFocus" />
-
-                        <!-- Transparent strip that turns the breadcrumb into an edit box. -->
-                        <Border Background="Transparent"
-                                x:Name="AddressActivator"
-                                MouseLeftButtonDown="OnAddressActivate" />
-                    </Grid>
-                </Border>
-
-                <StackPanel Grid.Column="2" Orientation="Horizontal">
-                    <Button Style="{StaticResource ToolButton}" Content="&#xE8F4;"
-                            Command="{Binding NewFolderCommand}" ToolTip="New folder (Ctrl+Shift+N)" />
-                    <Button Style="{StaticResource ToolButton}" Content="&#xE756;"
-                            Command="{Binding TerminalCommand}" ToolTip="Open in Terminal (Ctrl+`)" />
-                    <ToggleButton x:Name="HiddenToggle"
-                                  Content="&#xE7B3;"
-                                  IsChecked="{Binding ShowHiddenItems}"
-                                  ToolTip="Show hidden items"
-                                  Width="34" Height="30"
-                                  Background="Transparent"
-                                  BorderThickness="0"
-                                  Foreground="{StaticResource Text}"
-                                  FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
-                                  FontSize="13"
-                                  Cursor="Hand" />
-                </StackPanel>
-            </Grid>
-        </Border>
-
-        <!-- Body -->
+        <!-- ===== Body ===== -->
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="220" MinWidth="150" MaxWidth="420" />
+                <ColumnDefinition Width="228" MinWidth="170" MaxWidth="400" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
 
-            <!-- Sidebar -->
-            <Border Grid.Column="0" Background="{StaticResource SurfaceRaised}">
-                <ScrollViewer VerticalScrollBarVisibility="Auto"
-                              HorizontalScrollBarVisibility="Disabled"
-                              Padding="0,8">
-                    <ItemsControl ItemsSource="{Binding Sidebar}">
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <Grid>
-                                    <TextBlock Text="{Binding Name}"
-                                               Margin="20,12,0,4"
-                                               FontSize="10.5"
-                                               FontWeight="SemiBold"
-                                               Foreground="{StaticResource TextMuted}">
-                                        <TextBlock.Style>
-                                            <Style TargetType="TextBlock">
-                                                <Setter Property="Visibility" Value="Collapsed" />
-                                                <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding IsHeader}" Value="True">
-                                                        <Setter Property="Visibility" Value="Visible" />
-                                                    </DataTrigger>
-                                                </Style.Triggers>
-                                            </Style>
-                                        </TextBlock.Style>
-                                    </TextBlock>
+            <ScrollViewer Grid.Column="0"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled"
+                          Padding="0,0,0,10">
+                <ScrollViewer.ContextMenu>
+                    <ContextMenu>
+                        <MenuItem Header="New category" Click="OnCreateCategory" />
+                    </ContextMenu>
+                </ScrollViewer.ContextMenu>
+                <ItemsControl ItemsSource="{Binding Sidebar}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Button Content="{Binding CollapseGlyph}"
+                                        ToolTip="Collapse or expand"
+                                        Click="OnToggleSidebarSection"
+                                        Grid.Column="1"
+                                        Panel.ZIndex="2">
+                                    <Button.Style>
+                                        <Style TargetType="Button" BasedOn="{StaticResource IconButton}">
+                                            <Setter Property="Width" Value="25" />
+                                            <Setter Property="Height" Value="28" />
+                                            <Setter Property="Margin" Value="0,0,8,0" />
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsSection}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
 
-                                    <Button Content="{Binding Name}"
-                                            Tag="{Binding Path}"
-                                            Click="OnSidebarClick">
-                                        <Button.Style>
-                                            <Style TargetType="Button" BasedOn="{StaticResource SidebarButton}">
-                                                <Setter Property="Visibility" Value="Visible" />
-                                                <Style.Triggers>
-                                                    <DataTrigger Binding="{Binding IsHeader}" Value="True">
+                                <Button Content="{Binding Name}"
+                                        ToolTip="Open section"
+                                        Grid.Column="0"
+                                        Padding="12,0"
+                                        Click="OnSidebarClick"
+                                        AllowDrop="True"
+                                        PreviewMouseLeftButtonDown="OnSidebarMouseDown"
+                                        PreviewMouseLeftButtonUp="OnSidebarMouseUp"
+                                        PreviewMouseMove="OnSidebarMouseMove"
+                                        DragEnter="OnSidebarDragEnter"
+                                        DragLeave="OnSidebarDragLeave"
+                                        DragOver="OnSidebarDragOver"
+                                        Drop="OnSidebarDrop">
+                                    <Button.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="New category" Click="OnCreateCategory">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
                                                         <Setter Property="Visibility" Value="Collapsed" />
-                                                    </DataTrigger>
-                                                </Style.Triggers>
-                                            </Style>
-                                        </Button.Style>
-                                    </Button>
-                                </Grid>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </ScrollViewer>
-            </Border>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsPinnedRoot}" Value="True">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                            <MenuItem Header="Open hub" Click="OnOpenSectionHub">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding HasHub}" Value="True">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                            <MenuItem Header="Rename section" Click="OnRenameCategory">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsSection}" Value="True">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                            <MenuItem Header="Delete category" Click="OnDeleteCategory">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsCategory}" Value="True">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                        </ContextMenu>
+                                    </Button.ContextMenu>
+                                    <Button.Style>
+                                        <Style TargetType="Button" BasedOn="{StaticResource SidebarHeaderButton}">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsHeader}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
+
+                                <Button Content="{Binding DisplayName}"
+                                        Tag="{Binding Name}"
+                                        ToolTip="{Binding Path}"
+                                        Click="OnSidebarClick"
+                                        AllowDrop="True"
+                                        PreviewMouseLeftButtonDown="OnSidebarMouseDown"
+                                        PreviewMouseLeftButtonUp="OnSidebarMouseUp"
+                                        PreviewMouseMove="OnSidebarMouseMove"
+                                        DragEnter="OnSidebarDragEnter"
+                                        DragLeave="OnSidebarDragLeave"
+                                        DragOver="OnSidebarDragOver"
+                                        Drop="OnSidebarDrop">
+                                    <Button.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Change location…" Click="OnChangeSidebarLocation">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsKnownFolder}" Value="True">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                            <MenuItem Header="Reset to default" Click="OnResetSidebarLocation">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsKnownFolder}" Value="True">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                            <MenuItem Header="Unpin" Click="OnUnpinSidebar">
+                                                <MenuItem.Style>
+                                                    <Style TargetType="MenuItem">
+                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsPinned}" Value="True">
+                                                                <Setter Property="Visibility" Value="Visible" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </MenuItem.Style>
+                                            </MenuItem>
+                                        </ContextMenu>
+                                    </Button.ContextMenu>
+                                    <Button.Style>
+                                        <Style TargetType="Button" BasedOn="{StaticResource SidebarButton}">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsHeader}" Value="True">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding IsChild}" Value="True">
+                                                    <Setter Property="Padding" Value="30,0,12,0" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
 
             <GridSplitter Grid.Column="1"
-                          Width="1"
-                          HorizontalAlignment="Stretch"
-                          Background="{StaticResource BorderBrush}" />
-
-            <!-- File list -->
-            <Grid Grid.Column="2">
-                <ListView x:Name="FileList"
-                          ItemsSource="{Binding Items}"
-                          ItemContainerStyle="{StaticResource FileRow}"
+                          Width="6"
+                          HorizontalAlignment="Center"
                           Background="Transparent"
-                          BorderThickness="0"
-                          Foreground="{StaticResource Text}"
-                          SelectionMode="Extended"
-                          SelectionChanged="OnSelectionChanged"
-                          MouseDoubleClick="OnItemDoubleClick"
-                          VirtualizingPanel.IsVirtualizing="True"
-                          VirtualizingPanel.VirtualizationMode="Recycling"
-                          VirtualizingPanel.ScrollUnit="Pixel"
-                          ScrollViewer.IsDeferredScrollingEnabled="False">
+                          FocusVisualStyle="{x:Null}" />
 
-                    <ListView.ContextMenu>
-                        <ContextMenu Style="{StaticResource DarkMenu}">
-                            <MenuItem Header="Open" Command="{Binding OpenCommand}" />
-                            <Separator />
-                            <MenuItem Header="Cut" Command="{Binding CutCommand}" InputGestureText="Ctrl+X" />
-                            <MenuItem Header="Copy" Command="{Binding CopyCommand}" InputGestureText="Ctrl+C" />
-                            <MenuItem Header="Paste" Command="{Binding PasteCommand}" InputGestureText="Ctrl+V" />
-                            <MenuItem Header="Copy path" Command="{Binding CopyPathCommand}" InputGestureText="Ctrl+Shift+C" />
-                            <Separator />
-                            <MenuItem Header="Rename" Command="{Binding RenameCommand}" InputGestureText="F2" />
-                            <MenuItem Header="Delete" Command="{Binding DeleteCommand}" InputGestureText="Del" />
-                            <Separator />
-                            <MenuItem Header="New folder" Command="{Binding NewFolderCommand}" InputGestureText="Ctrl+Shift+N" />
-                            <MenuItem Header="Open in Terminal" Command="{Binding TerminalCommand}" />
-                            <Separator />
-                            <MenuItem Header="Properties" Command="{Binding PropertiesCommand}" InputGestureText="Alt+Enter" />
-                        </ContextMenu>
-                    </ListView.ContextMenu>
+            <Border Grid.Column="2"
+                    Background="{StaticResource Surface}"
+                    BorderBrush="{StaticResource Line}"
+                    BorderThickness="1"
+                    CornerRadius="12"
+                    Margin="0,0,14,14">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
 
-                    <ListView.View>
-                        <GridView ColumnHeaderContainerStyle="{StaticResource ColumnHeader}">
-                            <GridViewColumn Width="380" Header="Name">
-                                <GridViewColumn.CellTemplate>
-                                    <DataTemplate>
-                                        <StackPanel Orientation="Horizontal">
-                                            <Image Source="{Binding Icon}"
-                                                   Width="16" Height="16"
-                                                   Margin="4,0,8,0"
-                                                   RenderOptions.BitmapScalingMode="NearestNeighbor" />
-                                            <TextBlock Text="{Binding Name}"
-                                                       VerticalAlignment="Center"
-                                                       TextTrimming="CharacterEllipsis" />
-                                        </StackPanel>
-                                    </DataTemplate>
-                                </GridViewColumn.CellTemplate>
-                            </GridViewColumn>
+                    <Border Grid.Row="0"
+                            Margin="14,14,14,6"
+                            Padding="18,14"
+                            Background="{StaticResource Base}"
+                            BorderBrush="{StaticResource Line}"
+                            BorderThickness="1"
+                            CornerRadius="10"
+                            Visibility="{Binding IsHub, Converter={StaticResource BoolToVisible}}">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="{Binding HubTitle}"
+                                           FontFamily="{StaticResource DisplayFont}"
+                                           FontSize="23"
+                                           Foreground="{StaticResource Ink}" />
+                                <TextBlock Text="{Binding HubDescription}"
+                                           Margin="0,4,0,0"
+                                           FontSize="12"
+                                           Foreground="{StaticResource InkMuted}" />
+                            </StackPanel>
+                            <TextBlock Grid.Column="1"
+                                       Text="{Binding HubSummary}"
+                                       MaxWidth="330"
+                                       Margin="18,4,0,0"
+                                       FontFamily="{StaticResource SerifFont}"
+                                       FontSize="13"
+                                       TextAlignment="Right"
+                                       TextWrapping="Wrap"
+                                       Foreground="{StaticResource Accent}" />
+                        </Grid>
+                    </Border>
 
-                            <GridViewColumn Width="170" Header="Date modified">
-                                <GridViewColumn.CellTemplate>
-                                    <DataTemplate>
-                                        <TextBlock Text="{Binding DateModifiedText}"
-                                                   Foreground="{StaticResource TextMuted}"
-                                                   Margin="8,0,0,0"
-                                                   VerticalAlignment="Center" />
-                                    </DataTemplate>
-                                </GridViewColumn.CellTemplate>
-                            </GridViewColumn>
+                    <ListView x:Name="FileList"
+                              Grid.Row="1"
+                              ItemsSource="{Binding Items}"
+                              Background="Transparent"
+                              BorderThickness="0"
+                              Foreground="{StaticResource Ink}"
+                              SelectionMode="Extended"
+                              FocusVisualStyle="{x:Null}"
+                              SelectionChanged="OnSelectionChanged"
+                              MouseDoubleClick="OnItemDoubleClick"
+                              PreviewMouseRightButtonDown="OnFileListRightClick"
+                              PreviewMouseWheel="OnFileListMouseWheel"
+                              VirtualizingPanel.IsVirtualizing="True"
+                              VirtualizingPanel.VirtualizationMode="Recycling"
+                              VirtualizingPanel.ScrollUnit="Pixel"
+                              ScrollViewer.CanContentScroll="True"
+                              ScrollViewer.HorizontalScrollBarVisibility="Disabled">
 
-                            <GridViewColumn Width="160" Header="Type">
-                                <GridViewColumn.CellTemplate>
-                                    <DataTemplate>
-                                        <TextBlock Text="{Binding TypeName}"
-                                                   Foreground="{StaticResource TextMuted}"
-                                                   Margin="8,0,0,0"
-                                                   VerticalAlignment="Center"
-                                                   TextTrimming="CharacterEllipsis" />
-                                    </DataTemplate>
-                                </GridViewColumn.CellTemplate>
-                            </GridViewColumn>
+                        <ListView.Style>
+                            <Style TargetType="ListView">
+                                <Setter Property="View" Value="{StaticResource DetailsView}" />
+                                <Setter Property="ItemContainerStyle" Value="{StaticResource FileRow}" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsGrid}" Value="True">
+                                        <Setter Property="View" Value="{x:Null}" />
+                                        <Setter Property="ItemTemplate" Value="{StaticResource TileTemplate}" />
+                                        <Setter Property="ItemsPanel" Value="{StaticResource TilePanel}" />
+                                        <Setter Property="ItemContainerStyle" Value="{StaticResource TileContainer}" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </ListView.Style>
 
-                            <GridViewColumn Width="110" Header="Size">
-                                <GridViewColumn.CellTemplate>
-                                    <DataTemplate>
-                                        <TextBlock Text="{Binding SizeText}"
-                                                   Foreground="{StaticResource TextMuted}"
-                                                   Margin="8,0,0,0"
-                                                   HorizontalAlignment="Right"
-                                                   VerticalAlignment="Center" />
-                                    </DataTemplate>
-                                </GridViewColumn.CellTemplate>
-                            </GridViewColumn>
-                        </GridView>
-                    </ListView.View>
-                </ListView>
+                        <ListView.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Open" Command="{Binding OpenCommand}" />
+                                <Separator />
+                                <MenuItem Header="Cut" Command="{Binding CutCommand}" InputGestureText="Ctrl+X" />
+                                <MenuItem Header="Copy" Command="{Binding CopyCommand}" InputGestureText="Ctrl+C" />
+                                <MenuItem Header="Paste" Command="{Binding PasteCommand}" InputGestureText="Ctrl+V" />
+                                <Separator />
+                                <MenuItem Header="Rename" Command="{Binding RenameCommand}" InputGestureText="F2" />
+                                <MenuItem Header="Delete" Command="{Binding DeleteCommand}" InputGestureText="Del" />
+                                <Separator />
+                                <MenuItem Header="Pin to sidebar" Click="OnPinDirectory" />
+                                <MenuItem Header="Copy path" Command="{Binding CopyPathCommand}" InputGestureText="Ctrl+Shift+C" />
+                                <MenuItem Header="Properties" Command="{Binding PropertiesCommand}" InputGestureText="Alt+Enter" />
+                            </ContextMenu>
+                        </ListView.ContextMenu>
+                    </ListView>
 
-                <!-- Inline rename overlay -->
-                <Border x:Name="RenamePanel"
-                        Visibility="Collapsed"
-                        Background="{StaticResource SurfaceRaised}"
-                        BorderBrush="{StaticResource Accent}"
-                        BorderThickness="1"
-                        CornerRadius="6"
-                        Padding="16"
-                        Width="420"
-                        HorizontalAlignment="Center"
-                        VerticalAlignment="Center">
-                    <StackPanel>
-                        <TextBlock Text="Rename" FontWeight="SemiBold" Margin="0,0,0,10" />
+                    <Border Grid.Row="2"
+                            BorderBrush="{StaticResource LineFaint}"
+                            BorderThickness="0,1,0,0"
+                            Padding="16,8">
+                        <Grid>
+                            <TextBlock Text="{Binding StatusText}"
+                                       Foreground="{StaticResource InkMuted}"
+                                       FontSize="11.5"
+                                       VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis" />
+
+                            <Border HorizontalAlignment="Right"
+                                    Background="{StaticResource Base}"
+                                    CornerRadius="5"
+                                    Padding="8,3"
+                                    Visibility="{Binding HasTiming, Converter={StaticResource BoolToVisible}}">
+                                <TextBlock Text="{Binding TimingText}"
+                                           FontFamily="{StaticResource MonoFont}"
+                                           FontSize="10.5"
+                                           Foreground="{StaticResource Accent}" />
+                            </Border>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <Border x:Name="RenamePanel"
+                    Grid.Column="2"
+                    Visibility="Collapsed"
+                    Background="{StaticResource Overlay}"
+                    BorderBrush="{StaticResource Accent}"
+                    BorderThickness="1"
+                    CornerRadius="12"
+                    Padding="18"
+                    Width="440"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center">
+                <StackPanel>
+                    <TextBlock Text="Rename"
+                               FontFamily="{StaticResource DisplayFont}"
+                               FontSize="16"
+                               Margin="0,0,0,12" />
+                    <Border Background="{StaticResource Base}"
+                            BorderBrush="{StaticResource Line}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="10,8">
                         <TextBox x:Name="RenameBox"
-                                 Background="{StaticResource SurfaceSunken}"
-                                 Foreground="{StaticResource Text}"
-                                 CaretBrush="{StaticResource Text}"
-                                 BorderBrush="{StaticResource BorderBrush}"
-                                 BorderThickness="1"
-                                 Padding="8,6"
+                                 Style="{StaticResource PlainTextBox}"
                                  KeyDown="OnRenameKeyDown" />
-                        <TextBlock Text="Enter to confirm, Esc to cancel"
-                                   Foreground="{StaticResource TextMuted}"
-                                   FontSize="11"
-                                   Margin="0,8,0,0" />
-                    </StackPanel>
-                </Border>
-            </Grid>
-        </Grid>
+                    </Border>
+                    <TextBlock Text="Enter to confirm, Esc to cancel"
+                               Foreground="{StaticResource InkFaint}"
+                               FontSize="11"
+                               Margin="2,10,0,0" />
+                </StackPanel>
+            </Border>
 
-        <!-- Status bar -->
-        <Border Grid.Row="2"
-                Background="{StaticResource SurfaceRaised}"
-                BorderBrush="{StaticResource BorderBrush}"
-                BorderThickness="0,1,0,0"
-                Padding="14,5">
-            <TextBlock Text="{Binding StatusText}"
-                       Foreground="{StaticResource TextMuted}"
-                       FontSize="11.5" />
-        </Border>
+            <Border x:Name="CategoryPanel"
+                    Grid.Column="2"
+                    Visibility="Collapsed"
+                    Background="{StaticResource Overlay}"
+                    BorderBrush="{StaticResource Accent}"
+                    BorderThickness="1"
+                    CornerRadius="12"
+                    Padding="18"
+                    Width="440"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center">
+                <StackPanel>
+                    <TextBlock x:Name="CategoryPanelTitle"
+                               Text="New category"
+                               FontFamily="{StaticResource DisplayFont}"
+                               FontSize="16"
+                               Margin="0,0,0,12" />
+                    <Border Background="{StaticResource Base}"
+                            BorderBrush="{StaticResource Line}"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="10,8">
+                        <TextBox x:Name="CategoryBox"
+                                 Style="{StaticResource PlainTextBox}"
+                                 KeyDown="OnCategoryKeyDown" />
+                    </Border>
+                    <TextBlock Text="Enter to save, Esc to cancel"
+                               Foreground="{StaticResource InkFaint}"
+                               FontSize="11"
+                               Margin="2,10,0,0" />
+                </StackPanel>
+            </Border>
+        </Grid>
     </Grid>
 </Window>

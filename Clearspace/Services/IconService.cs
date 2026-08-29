@@ -16,22 +16,27 @@ namespace Clearspace.Services;
 /// one shell call, not 80,000. SHGFI_USEFILEATTRIBUTES also tells the shell to answer
 /// from the registry rather than opening the file, so no disk access happens at all.
 ///
-/// Types that carry their own icon (executables, shortcuts, icons) bypass the cache.
+/// Clearspace intentionally uses type icons—even for executables and shortcuts—during
+/// initial listing. Asking the shell for a per-file icon makes a Downloads folder with
+/// thousands of installers perform thousands of synchronous shell calls and can stall
+/// or crash the UI. A per-file icon can be fetched later for an explicit preview.
 /// </summary>
 public static class IconService
 {
     private static readonly ConcurrentDictionary<string, ImageSource?> IconCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, ImageSource?> LargeIconCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, string> TypeNameCache = new(StringComparer.OrdinalIgnoreCase);
 
     private const string FolderKey = "\\__folder__";
 
-    private static readonly HashSet<string> SelfIconExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".exe", ".lnk", ".ico", ".cur", ".ani", ".msi", ".scr", ".cpl", ".url"
-    };
-
     public static ImageSource? GetIcon(FileSystemItem item)
     {
+        // A drive is navigable like a folder, but it should still read as a device.
+        // Ask the shell for the real root icon rather than applying the folder type
+        // icon we use for ordinary directories.
+        if (item.IsDriveRoot)
+            return IconCache.GetOrAdd($"drive:{item.FullPath}", _ => LoadIcon(item.FullPath, isFolder: true, useAttributes: false, large: true));
+
         if (item.IsFolder)
             return IconCache.GetOrAdd(FolderKey, _ => LoadIcon(item.FullPath, isFolder: true, useAttributes: true));
 
@@ -41,14 +46,14 @@ public static class IconService
         if (string.IsNullOrEmpty(extension))
             return IconCache.GetOrAdd(".__none__", _ => LoadIcon("file", isFolder: false, useAttributes: true));
 
-        if (SelfIconExtensions.Contains(extension))
-            return LoadIcon(item.FullPath, isFolder: false, useAttributes: false);
-
         return IconCache.GetOrAdd(extension, ext => LoadIcon("file" + ext, isFolder: false, useAttributes: true));
     }
 
     public static string GetTypeName(FileSystemItem item)
     {
+        if (item.IsDriveRoot)
+            return item.DriveKind ?? "Drive";
+
         if (item.IsFolder)
             return "File folder";
 
@@ -73,11 +78,70 @@ public static class IconService
         });
     }
 
-    private static ImageSource? LoadIcon(string path, bool isFolder, bool useAttributes)
+    /// <summary>
+    /// Returns the actual high-resolution icon registered with Windows for this
+    /// path/type. Grid tiles use this instead of stretching a small details icon.
+    /// </summary>
+    public static ImageSource? GetLargeIcon(FileSystemItem item)
+    {
+        var key = item.IsFolder
+            ? item.IsDriveRoot ? $"drive:{item.FullPath}" : FolderKey
+            : string.IsNullOrEmpty(item.Extension) ? ".__none__" : item.Extension;
+
+        return LargeIconCache.GetOrAdd(key, _ => LoadLargeIcon(item));
+    }
+
+    private static ImageSource? LoadLargeIcon(FileSystemItem item)
+    {
+        var info = new NativeMethods.SHFILEINFO();
+        var result = NativeMethods.SHGetFileInfoW(
+            item.FullPath,
+            item.IsFolder ? NativeMethods.FILE_ATTRIBUTE_DIRECTORY : NativeMethods.FILE_ATTRIBUTE_NORMAL,
+            ref info,
+            (uint)System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.SHFILEINFO>(),
+            NativeMethods.SHGFI_SYSICONINDEX);
+
+        if (result == IntPtr.Zero || info.iIcon < 0)
+            return null;
+
+        NativeMethods.IImageList? imageList = null;
+        var icon = IntPtr.Zero;
+
+        try
+        {
+            var iid = new Guid("46EB5926-582E-4017-9FDF-E8998DAA0950");
+            if (NativeMethods.SHGetImageList(NativeMethods.SHIL_JUMBO, ref iid, out imageList) < 0 || imageList is null)
+                return null;
+
+            if (imageList.GetIcon(info.iIcon, 1, out icon) < 0 || icon == IntPtr.Zero)
+                return null;
+
+            var source = Imaging.CreateBitmapSourceFromHIcon(
+                icon,
+                System.Windows.Int32Rect.Empty,
+                BitmapSizeOptions.FromEmptyOptions());
+            source.Freeze();
+            return source;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+        finally
+        {
+            if (icon != IntPtr.Zero)
+                NativeMethods.DestroyIcon(icon);
+            if (imageList is not null)
+                System.Runtime.InteropServices.Marshal.ReleaseComObject(imageList);
+        }
+    }
+
+    private static ImageSource? LoadIcon(string path, bool isFolder, bool useAttributes, bool large = false)
     {
         var info = new NativeMethods.SHFILEINFO();
 
-        var flags = NativeMethods.SHGFI_ICON | NativeMethods.SHGFI_SMALLICON;
+        var flags = NativeMethods.SHGFI_ICON |
+                    (large ? NativeMethods.SHGFI_LARGEICON : NativeMethods.SHGFI_SMALLICON);
         if (useAttributes)
             flags |= NativeMethods.SHGFI_USEFILEATTRIBUTES;
 

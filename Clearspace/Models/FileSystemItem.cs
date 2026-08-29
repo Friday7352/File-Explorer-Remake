@@ -24,7 +24,18 @@ public sealed class FileSystemItem : ObservableObject
 
     public DateTime DateCreated { get; init; }
 
+    /// <summary>True for the virtual items shown on My PC and Network.</summary>
+    public bool IsDriveRoot { get; init; }
+
+    public string? DriveKind { get; init; }
+
+    public long DriveTotalSpace { get; init; }
+
+    public long DriveAvailableSpace { get; init; }
+
     public bool IsFolder => (Attributes & FileAttributes.Directory) != 0;
+
+    public bool IsStandardFolder => IsFolder && !IsDriveRoot;
 
     public bool IsHidden => (Attributes & FileAttributes.Hidden) != 0;
 
@@ -33,7 +44,20 @@ public sealed class FileSystemItem : ObservableObject
 
     public string Extension => IsFolder ? string.Empty : Path.GetExtension(Name);
 
-    public string SizeText => IsFolder ? string.Empty : FormatSize(Size);
+    public string SizeText => IsDriveRoot
+        ? $"{FormatSize(DriveAvailableSpace)} free of {FormatSize(DriveTotalSpace)}"
+        : IsFolder ? string.Empty : FormatSize(Size);
+
+    public double DriveUsagePercent => DriveTotalSpace <= 0
+        ? 0
+        : Math.Clamp((DriveTotalSpace - DriveAvailableSpace) * 100d / DriveTotalSpace, 0, 100);
+
+    public Brush DriveUsageBrush => DriveUsagePercent switch
+    {
+        >= 90 => new SolidColorBrush(Color.FromRgb(214, 95, 84)),
+        >= 75 => new SolidColorBrush(Color.FromRgb(211, 161, 95)),
+        _ => new SolidColorBrush(Color.FromRgb(112, 178, 132))
+    };
 
     public string DateModifiedText => DateModified == DateTime.MinValue
         ? string.Empty
@@ -50,8 +74,52 @@ public sealed class FileSystemItem : ObservableObject
     public ImageSource? Icon
     {
         get => _icon;
-        set => SetProperty(ref _icon, value);
+        set
+        {
+            if (SetProperty(ref _icon, value))
+            {
+                OnPropertyChanged(nameof(DisplayImage));
+                OnPropertyChanged(nameof(GridImage));
+            }
+        }
     }
+
+    private ImageSource? _gridPlaceholder;
+    public ImageSource? GridPlaceholder
+    {
+        get => _gridPlaceholder;
+        internal set
+        {
+            if (SetProperty(ref _gridPlaceholder, value))
+                OnPropertyChanged(nameof(GridImage));
+        }
+    }
+
+    private ImageSource? _thumbnail;
+    public ImageSource? Thumbnail
+    {
+        get => _thumbnail;
+        set
+        {
+            if (SetProperty(ref _thumbnail, value))
+            {
+                OnPropertyChanged(nameof(DisplayImage));
+                OnPropertyChanged(nameof(GridImage));
+                OnPropertyChanged(nameof(HasThumbnail));
+            }
+        }
+    }
+
+    public bool HasThumbnail => _thumbnail is not null;
+
+    /// <summary>
+    /// What a tile actually shows: the real thumbnail once it arrives, and the
+    /// cached type icon until then, so tiles never render empty.
+    /// </summary>
+    public ImageSource? DisplayImage => _thumbnail ?? _icon;
+
+    /// <summary>Grid-specific image with a crisp vector shown while previews load.</summary>
+    public ImageSource? GridImage => _thumbnail ?? _gridPlaceholder ?? _icon;
 
     internal static FileSystemItem FromFindData(string directory, in NativeMethods.WIN32_FIND_DATA data)
     {
@@ -67,6 +135,63 @@ public sealed class FileSystemItem : ObservableObject
             DateModified = ToDateTime(data.ftLastWriteTime),
             DateCreated = ToDateTime(data.ftCreationTime)
         };
+    }
+
+    internal static FileSystemItem FromDrive(DriveInfo drive)
+    {
+        var root = drive.RootDirectory.FullName;
+        var label = string.IsNullOrWhiteSpace(drive.VolumeLabel) ? "Local Disk" : drive.VolumeLabel;
+        var kind = drive.DriveType == DriveType.Network ? "Network drive" : "Local drive";
+
+        return new FileSystemItem
+        {
+            Name = $"{label} ({root.TrimEnd('\\')})",
+            FullPath = root,
+            Attributes = FileAttributes.Directory,
+            IsDriveRoot = true,
+            DriveKind = kind,
+            DriveTotalSpace = drive.TotalSize,
+            DriveAvailableSpace = drive.AvailableFreeSpace
+        };
+    }
+
+    /// <summary>Builds a lightweight hub tile for a known or pinned location.</summary>
+    internal static FileSystemItem? FromLocation(string path, string? displayName = null)
+    {
+        try
+        {
+            var attributes = File.GetAttributes(path);
+            var isFolder = (attributes & FileAttributes.Directory) != 0;
+            var name = displayName ?? Path.GetFileName(path.TrimEnd('\\', '/'));
+            if (string.IsNullOrWhiteSpace(name))
+                name = path;
+
+            if (isFolder)
+            {
+                var info = new DirectoryInfo(path);
+                return new FileSystemItem
+                {
+                    Name = name,
+                    FullPath = path,
+                    Attributes = attributes,
+                    DateModified = info.LastWriteTime,
+                    DateCreated = info.CreationTime
+                };
+            }
+
+            var file = new FileInfo(path);
+            return new FileSystemItem
+            {
+                Name = name,
+                FullPath = path,
+                Attributes = attributes,
+                Size = file.Length,
+                DateModified = file.LastWriteTime,
+                DateCreated = file.CreationTime
+            };
+        }
+        catch (IOException) { return null; }
+        catch (UnauthorizedAccessException) { return null; }
     }
 
     private static DateTime ToDateTime(NativeMethods.FILETIME fileTime)

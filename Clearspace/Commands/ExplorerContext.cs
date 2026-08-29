@@ -59,5 +59,8 @@ public sealed class ExplorerContext : ObservableObject
 
     public Action? FocusAddressBar { get; set; }
 
+    /// <summary>Set by the view; switches between details and tiles.</summary>
+    public Action? ToggleLayout { get; set; }
+
     public string[] SelectedPaths => SelectedItems.Select(item => item.FullPath).ToArray();
 }

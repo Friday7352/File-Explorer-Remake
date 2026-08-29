@@ -108,6 +108,7 @@ internal static class NativeMethods
     internal const uint SHGFI_SMALLICON = 0x00000001;
     internal const uint SHGFI_USEFILEATTRIBUTES = 0x00000010;
     internal const uint SHGFI_TYPENAME = 0x00000400;
+    internal const uint SHGFI_SYSICONINDEX = 0x00004000;
 
     internal const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
     internal const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
@@ -119,6 +120,32 @@ internal static class NativeMethods
         ref SHFILEINFO psfi,
         uint cbFileInfo,
         uint uFlags);
+
+    // Explorer's high-DPI icon source. SHGetFileInfo gives us a stable index in
+    // this list; SHIL_JUMBO then gives a real 256px shell image instead of the
+    // 16px list icon that becomes blurry when a tile enlarges it.
+    internal const int SHIL_JUMBO = 0x4;
+
+    [DllImport("shell32.dll", EntryPoint = "#727", PreserveSig = true)]
+    internal static extern int SHGetImageList(
+        int iImageList,
+        ref Guid riid,
+        [MarshalAs(UnmanagedType.Interface)] out IImageList ppv);
+
+    [ComImport]
+    [Guid("46EB5926-582E-4017-9FDF-E8998DAA0950")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IImageList
+    {
+        [PreserveSig] int Add(IntPtr hbmImage, IntPtr hbmMask, ref int pi);
+        [PreserveSig] int ReplaceIcon(int i, IntPtr hicon, ref int pi);
+        [PreserveSig] int SetOverlayImage(int iImage, int iOverlay);
+        [PreserveSig] int Replace(int i, IntPtr hbmImage, IntPtr hbmMask);
+        [PreserveSig] int AddMasked(IntPtr hbmImage, uint crMask, ref int pi);
+        [PreserveSig] int Draw(IntPtr pimldp);
+        [PreserveSig] int Remove(int i);
+        [PreserveSig] int GetIcon(int i, uint flags, out IntPtr picon);
+    }
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -180,10 +207,69 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool ShellExecuteExW(ref SHELLEXECUTEINFO lpExecInfo);
 
+    // ---------- Known folders ----------
+
+    /// <summary>
+    /// Resolves a known folder to its actual location. Environment.SpecialFolder
+    /// has no Downloads entry and does not honour relocation, so this is the only
+    /// correct way to find where these folders really live.
+    /// </summary>
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+    internal static extern int SHGetKnownFolderPath(ref Guid rfid, uint dwFlags, IntPtr hToken, out IntPtr ppszPath);
+
+    [DllImport("ole32.dll")]
+    internal static extern void CoTaskMemFree(IntPtr pv);
+
+    // ---------- Thumbnails ----------
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct SIZE
+    {
+        public int cx;
+        public int cy;
+
+        public SIZE(int width, int height)
+        {
+            cx = width;
+            cy = height;
+        }
+    }
+
+    [ComImport]
+    [Guid("bcc18b79-ba16-442f-80c4-8a59c30c463b")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IShellItemImageFactory
+    {
+        [PreserveSig] int GetImage(SIZE size, int flags, out IntPtr phbm);
+    }
+
+    internal const int SIIGBF_RESIZETOFIT = 0x00;
+    internal const int SIIGBF_BIGGERSIZEOK = 0x01;
+    internal const int SIIGBF_ICONONLY = 0x04;
+    internal const int SIIGBF_THUMBNAILONLY = 0x08;
+    internal const int SIIGBF_INCACHEONLY = 0x10;
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+    internal static extern int SHCreateItemFromParsingName(
+        string pszPath,
+        IntPtr pbc,
+        ref Guid riid,
+        [MarshalAs(UnmanagedType.Interface)] out IShellItemImageFactory ppv);
+
+    internal static Guid IID_IShellItemImageFactory = new("bcc18b79-ba16-442f-80c4-8a59c30c463b");
+
+    [DllImport("gdi32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool DeleteObject(IntPtr hObject);
+
     // ---------- Window chrome ----------
 
     internal const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
     internal const int DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY = 19;
+
+    /// <summary>Windows 11 rounded window corners. Ignored on Windows 10.</summary>
+    internal const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+    internal const int DWMWCP_ROUND = 2;
 
     [DllImport("dwmapi.dll")]
     internal static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
