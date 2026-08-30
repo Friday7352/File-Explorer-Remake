@@ -121,23 +121,38 @@ public sealed class OpenTerminalAction(ExplorerContext context) : IAction
         if (!Directory.Exists(folder))
             return Task.CompletedTask;
 
-        // Windows Terminal when present, otherwise fall back to PowerShell.
-        foreach (var executable in new[] { "wt.exe", "powershell.exe" })
+        // Windows Terminal does not consistently honour WorkingDirectory when it
+        // is launched through the shell, so pass its explicit starting-directory
+        // switch as well. PowerShell remains a dependable fallback.
+        try
         {
-            try
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = executable,
-                    WorkingDirectory = folder,
-                    UseShellExecute = true
-                });
-                return Task.CompletedTask;
-            }
-            catch (Exception)
+                FileName = "wt.exe",
+                Arguments = $"-d \"{folder}\"",
+                WorkingDirectory = folder,
+                UseShellExecute = true
+            });
+            return Task.CompletedTask;
+        }
+        catch (Exception)
+        {
+            // Windows Terminal is optional. PowerShell's working directory is
+            // correctly inherited by its console window.
+        }
+
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
             {
-                // Try the next candidate.
-            }
+                FileName = "powershell.exe",
+                WorkingDirectory = folder,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception)
+        {
+            // No terminal is available on this machine.
         }
 
         return Task.CompletedTask;

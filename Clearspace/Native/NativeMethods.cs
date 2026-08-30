@@ -153,7 +153,16 @@ internal static class NativeMethods
 
     // ---------- Shell file operations ----------
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode, Pack = 1)]
+    /// <summary>
+    /// No Pack setting: this must use the platform's natural alignment.
+    ///
+    /// The widely-copied Pack = 1 version of this declaration is an x86 artifact.
+    /// On x64 it packs the struct to 50 bytes where shell32 expects 56, so pFrom
+    /// and every field after it land at the wrong offsets and the shell reads
+    /// garbage pointers. That is an access violation, not a managed exception, so
+    /// it takes the process down instead of surfacing in the error dialog.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     internal struct SHFILEOPSTRUCT
     {
         public IntPtr hwnd;
@@ -261,6 +270,131 @@ internal static class NativeMethods
     [DllImport("gdi32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool DeleteObject(IntPtr hObject);
+
+    // ---------- Property store (media metadata) ----------
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct PROPERTYKEY
+    {
+        public Guid fmtid;
+        public uint pid;
+
+        public PROPERTYKEY(string formatId, uint propertyId)
+        {
+            fmtid = new Guid(formatId);
+            pid = propertyId;
+        }
+    }
+
+    /// <summary>
+    /// 24 bytes on x64: a 8-byte header then a 16-byte union. The union is never
+    /// read directly here; the propsys helpers below do the type coercion, which
+    /// avoids hand-decoding every variant type audio tags can produce.
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct PROPVARIANT
+    {
+        public ushort vt;
+        public ushort wReserved1;
+        public ushort wReserved2;
+        public ushort wReserved3;
+        public IntPtr value1;
+        public IntPtr value2;
+    }
+
+    [ComImport]
+    [Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IPropertyStore
+    {
+        [PreserveSig] int GetCount(out uint cProps);
+        [PreserveSig] int GetAt(uint iProp, out PROPERTYKEY pkey);
+        [PreserveSig] int GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
+        [PreserveSig] int SetValue(ref PROPERTYKEY key, ref PROPVARIANT pv);
+        [PreserveSig] int Commit();
+    }
+
+    internal static Guid IID_IPropertyStore = new("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99");
+
+    internal const int GPS_DEFAULT = 0;
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+    internal static extern int SHGetPropertyStoreFromParsingName(
+        string pszPath,
+        IntPtr pbc,
+        int flags,
+        ref Guid riid,
+        [MarshalAs(UnmanagedType.Interface)] out IPropertyStore ppv);
+
+    // Coercion helpers. PropVariantToStringAlloc also flattens multi-value tags
+    // (a track with three artists) into one delimited string.
+    [DllImport("propsys.dll", PreserveSig = true)]
+    internal static extern int PropVariantToStringAlloc(ref PROPVARIANT pv, out IntPtr ppsz);
+
+    [DllImport("propsys.dll", PreserveSig = true)]
+    internal static extern int PropVariantToUInt32(ref PROPVARIANT pv, out uint pui);
+
+    [DllImport("propsys.dll", PreserveSig = true)]
+    internal static extern int PropVariantToUInt64(ref PROPVARIANT pv, out ulong pull);
+
+    [DllImport("ole32.dll", PreserveSig = true)]
+    internal static extern int PropVariantClear(ref PROPVARIANT pv);
+
+    // ---------- Storage device identification ----------
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern SafeFileHandle CreateFileW(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile);
+
+    internal const uint OPEN_EXISTING = 3;
+    internal const uint FILE_SHARE_READ = 0x00000001;
+    internal const uint FILE_SHARE_WRITE = 0x00000002;
+
+    /// <summary>
+    /// Query only, so the volume handle is opened with no access rights at all.
+    /// That is what lets this run without administrator: asking a device to
+    /// describe itself needs no permission, whereas reading its contents does.
+    /// </summary>
+    internal const uint NO_ACCESS = 0;
+
+    internal const uint IOCTL_STORAGE_QUERY_PROPERTY = 0x002D1400;
+
+    internal const int StorageDeviceProperty = 0;
+    internal const int StorageDeviceSeekPenaltyProperty = 7;
+    internal const int PropertyStandardQuery = 0;
+
+    /// <summary>STORAGE_BUS_TYPE. Only the ones worth distinguishing are named.</summary>
+    internal const int BusTypeNvme = 0x11;
+    internal const int BusTypeSata = 0x0B;
+    internal const int BusTypeSd = 0x0D;
+    internal const int BusTypeMmc = 0x0E;
+    internal const int BusTypeUsb = 0x07;
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct STORAGE_PROPERTY_QUERY
+    {
+        public int PropertyId;
+        public int QueryType;
+        public byte AdditionalParameters;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool DeviceIoControl(
+        SafeFileHandle hDevice,
+        uint dwIoControlCode,
+        ref STORAGE_PROPERTY_QUERY lpInBuffer,
+        int nInBufferSize,
+        IntPtr lpOutBuffer,
+        int nOutBufferSize,
+        out int lpBytesReturned,
+        IntPtr lpOverlapped);
 
     // ---------- Window chrome ----------
 

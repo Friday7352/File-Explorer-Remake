@@ -90,8 +90,8 @@
 
             <Style TargetType="ScrollBar">
                 <Setter Property="Background" Value="Transparent" />
-                <Setter Property="Width" Value="12" />
-                <Setter Property="MinWidth" Value="12" />
+                <Setter Property="Width" Value="14" />
+                <Setter Property="MinWidth" Value="14" />
                 <Setter Property="Template">
                     <Setter.Value>
                         <ControlTemplate TargetType="ScrollBar">
@@ -102,7 +102,10 @@
                                                       Style="{StaticResource ScrollPageButton}" />
                                     </Track.DecreaseRepeatButton>
                                     <Track.Thumb>
-                                        <Thumb Style="{StaticResource ScrollThumb}" />
+                                        <!-- Without a floor the thumb shrinks toward
+                                             nothing in folders with tens of thousands
+                                             of items and stops being grabbable. -->
+                                        <Thumb Style="{StaticResource ScrollThumb}" MinHeight="52" />
                                     </Track.Thumb>
                                     <Track.IncreaseRepeatButton>
                                         <RepeatButton Command="ScrollBar.PageDownCommand"
@@ -117,8 +120,8 @@
                     <Trigger Property="Orientation" Value="Horizontal">
                         <Setter Property="Width" Value="Auto" />
                         <Setter Property="MinWidth" Value="0" />
-                        <Setter Property="Height" Value="12" />
-                        <Setter Property="MinHeight" Value="12" />
+                        <Setter Property="Height" Value="14" />
+                        <Setter Property="MinHeight" Value="14" />
                         <Setter Property="Template">
                             <Setter.Value>
                                 <ControlTemplate TargetType="ScrollBar">
@@ -129,7 +132,7 @@
                                                               Style="{StaticResource ScrollPageButton}" />
                                             </Track.DecreaseRepeatButton>
                                             <Track.Thumb>
-                                                <Thumb Style="{StaticResource ScrollThumb}" />
+                                                <Thumb Style="{StaticResource ScrollThumb}" MinWidth="52" />
                                             </Track.Thumb>
                                             <Track.IncreaseRepeatButton>
                                                 <RepeatButton Command="ScrollBar.PageRightCommand"
@@ -342,6 +345,26 @@
                         </ControlTemplate>
                     </Setter.Value>
                 </Setter>
+                <Style.Triggers>
+                    <!-- Hidden items read as faded, the way Explorer shows them. -->
+                    <DataTrigger Binding="{Binding IsHidden}" Value="True">
+                        <Setter Property="Opacity" Value="0.45" />
+                    </DataTrigger>
+                </Style.Triggers>
+            </Style>
+
+            <!-- Alternating rows. Kept very faint on purpose: the band has to stay
+                 well below the hover and selection tones or a striped row reads as
+                 an already-selected one. -->
+            <Style x:Key="MusicRow" TargetType="ListViewItem" BasedOn="{StaticResource FileRow}">
+                <Style.Triggers>
+                    <Trigger Property="ItemsControl.AlternationIndex" Value="1">
+                        <Setter Property="Background" Value="#05FFFFFF" />
+                    </Trigger>
+                    <DataTrigger Binding="{Binding IsHidden}" Value="True">
+                        <Setter Property="Opacity" Value="0.45" />
+                    </DataTrigger>
+                </Style.Triggers>
             </Style>
 
             <Style x:Key="ColumnHeader" TargetType="GridViewColumnHeader">
@@ -358,14 +381,39 @@
                 <Setter Property="Template">
                     <Setter.Value>
                         <ControlTemplate TargetType="GridViewColumnHeader">
-                            <Border x:Name="Root" Background="{TemplateBinding Background}">
-                                <ContentPresenter Margin="{TemplateBinding Padding}"
-                                                  HorizontalAlignment="Left"
-                                                  VerticalAlignment="Center" />
-                            </Border>
+                            <Grid>
+                                <Border x:Name="Root" Background="{TemplateBinding Background}">
+                                    <ContentPresenter Margin="{TemplateBinding Padding}"
+                                                      HorizontalAlignment="Left"
+                                                      VerticalAlignment="Center" />
+                                </Border>
+
+                                <!-- GridViewColumnHeader wires resizing to a thumb
+                                     with this exact name. Without it columns are
+                                     fixed, which is what my earlier template did. -->
+                                <Thumb x:Name="PART_HeaderGripper"
+                                       HorizontalAlignment="Right"
+                                       Width="9"
+                                       Cursor="SizeWE">
+                                    <Thumb.Template>
+                                        <ControlTemplate TargetType="Thumb">
+                                            <Border Background="Transparent" Padding="4,0">
+                                                <Rectangle Width="1"
+                                                           Fill="{StaticResource Line}"
+                                                           HorizontalAlignment="Center" />
+                                            </Border>
+                                        </ControlTemplate>
+                                    </Thumb.Template>
+                                </Thumb>
+                            </Grid>
                             <ControlTemplate.Triggers>
                                 <Trigger Property="IsMouseOver" Value="True">
                                     <Setter Property="Foreground" Value="{StaticResource InkMuted}" />
+                                </Trigger>
+                                <Trigger Property="Role" Value="Padding">
+                                    <!-- The filler header past the last column has no
+                                         edge to drag. -->
+                                    <Setter TargetName="PART_HeaderGripper" Property="Visibility" Value="Collapsed" />
                                 </Trigger>
                             </ControlTemplate.Triggers>
                         </ControlTemplate>
@@ -389,6 +437,25 @@
                 </Setter>
             </Style>
 
+            <!--
+                Menus do not use the implicit Separator style. MenuItem looks its
+                separators up by MenuItem.SeparatorStyleKey, so without this entry
+                every divider inside a context menu silently falls back to the stock
+                Windows one: full width, edge to edge, and far too bright.
+            -->
+            <Style x:Key="{x:Static MenuItem.SeparatorStyleKey}" TargetType="Separator">
+                <Setter Property="Height" Value="1" />
+                <Setter Property="Margin" Value="14,5" />
+                <Setter Property="Background" Value="#14FFFFFF" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="Separator">
+                            <Border Height="1" Background="{TemplateBinding Background}" />
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
             <Style TargetType="MenuItem">
                 <Setter Property="Foreground" Value="{StaticResource Ink}" />
                 <Setter Property="Background" Value="Transparent" />
@@ -398,32 +465,92 @@
                 <Setter Property="Template">
                     <Setter.Value>
                         <ControlTemplate TargetType="MenuItem">
-                            <Border x:Name="Root"
-                                    Background="{TemplateBinding Background}"
-                                    Margin="4,0"
-                                    Padding="10,0"
-                                    CornerRadius="6">
+                            <Grid>
+                                <Border x:Name="Root"
+                                        Background="{TemplateBinding Background}"
+                                        Margin="4,0"
+                                        Padding="10,0"
+                                        CornerRadius="6">
                                 <Grid>
                                     <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="Auto" />
                                     </Grid.ColumnDefinitions>
-                                    <ContentPresenter Grid.Column="0"
+
+                                    <!-- Gutter appears only for checkable items, so
+                                         ordinary menus keep their tight left edge. -->
+                                    <TextBlock x:Name="Check"
+                                               Grid.Column="0"
+                                               Text="&#xE73E;"
+                                               FontFamily="{StaticResource IconFont}"
+                                               FontSize="11"
+                                               Width="16"
+                                               Margin="0,0,6,0"
+                                               Opacity="0"
+                                               VerticalAlignment="Center"
+                                               Visibility="Collapsed"
+                                               Foreground="{StaticResource Accent}" />
+
+                                    <ContentPresenter Grid.Column="1"
                                                       ContentSource="Header"
                                                       VerticalAlignment="Center"
                                                       RecognizesAccessKey="True"
                                                       TextElement.Foreground="{TemplateBinding Foreground}"
                                                       TextElement.FontFamily="{TemplateBinding FontFamily}"
                                                       TextElement.FontSize="{TemplateBinding FontSize}" />
-                                    <TextBlock Grid.Column="1"
+                                    <TextBlock Grid.Column="2"
                                                Text="{TemplateBinding InputGestureText}"
                                                Margin="20,0,0,0"
                                                VerticalAlignment="Center"
                                                FontSize="10.5"
                                                Foreground="{StaticResource InkDisabled}" />
+                                    <!-- A real submenu needs both this affordance and
+                                         PART_Popup below. The prior custom template
+                                         drew the row but accidentally removed WPF's
+                                         popup, leaving nested menus unopenable. -->
+                                    <TextBlock x:Name="SubmenuArrow"
+                                               Grid.Column="3"
+                                               Text="&#xE76C;"
+                                               FontFamily="{StaticResource IconFont}"
+                                               FontSize="9"
+                                               Margin="8,0,0,0"
+                                               HorizontalAlignment="Right"
+                                               VerticalAlignment="Center"
+                                               Visibility="Collapsed"
+                                               Foreground="{StaticResource InkMuted}" />
                                 </Grid>
-                            </Border>
+                                </Border>
+
+                                <Popup x:Name="PART_Popup"
+                                       AllowsTransparency="True"
+                                       Focusable="False"
+                                       HorizontalOffset="3"
+                                       IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}"
+                                       Placement="Right"
+                                       PopupAnimation="Fade">
+                                    <Border Background="{StaticResource Overlay}"
+                                            BorderBrush="{StaticResource Line}"
+                                            BorderThickness="1"
+                                            CornerRadius="10"
+                                            Padding="0,5"
+                                            MinWidth="180">
+                                        <StackPanel IsItemsHost="True"
+                                                    KeyboardNavigation.DirectionalNavigation="Cycle" />
+                                    </Border>
+                                </Popup>
+                            </Grid>
                             <ControlTemplate.Triggers>
+                                <Trigger Property="HasItems" Value="True">
+                                    <Setter TargetName="SubmenuArrow" Property="Visibility" Value="Visible" />
+                                </Trigger>
+                                <Trigger Property="IsCheckable" Value="True">
+                                    <Setter TargetName="Check" Property="Visibility" Value="Visible" />
+                                </Trigger>
+                                <Trigger Property="IsChecked" Value="True">
+                                    <Setter TargetName="Check" Property="Opacity" Value="1" />
+                                </Trigger>
                                 <Trigger Property="IsHighlighted" Value="True">
                                     <Setter TargetName="Root" Property="Background" Value="{StaticResource Hover}" />
                                 </Trigger>
@@ -495,10 +622,182 @@
                         </ControlTemplate>
                     </Setter.Value>
                 </Setter>
+                <Style.Triggers>
+                    <DataTrigger Binding="{Binding IsHidden}" Value="True">
+                        <Setter Property="Opacity" Value="0.45" />
+                    </DataTrigger>
+                </Style.Triggers>
             </Style>
 
             <!-- TileTemplate lives in MainWindow.xaml: it carries an event handler,
                  which needs the window's code-behind. -->
+
+            <!-- ============ Media (player + viewer) ============ -->
+
+            <Style x:Key="SliderThumb" TargetType="Thumb">
+                <Setter Property="OverridesDefaultStyle" Value="True" />
+                <Setter Property="Height" Value="12" />
+                <Setter Property="Width" Value="12" />
+                <Setter Property="Cursor" Value="Hand" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="Thumb">
+                            <!-- Always visible: a handle you have to hover to find is
+                                 a handle you cannot aim at. It grows on hover instead. -->
+                            <Grid Background="Transparent">
+                                <Ellipse x:Name="Halo"
+                                         Fill="{StaticResource Accent}"
+                                         Opacity="0"
+                                         Margin="-3" />
+                                <Ellipse x:Name="Dot" Fill="{StaticResource Ink}" Margin="1" />
+                            </Grid>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Halo" Property="Opacity" Value="0.25" />
+                                    <Setter TargetName="Dot" Property="Margin" Value="0" />
+                                </Trigger>
+                                <Trigger Property="IsDragging" Value="True">
+                                    <Setter TargetName="Halo" Property="Opacity" Value="0.35" />
+                                    <Setter TargetName="Dot" Property="Margin" Value="0" />
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <!-- The filled portion is the decrease button; that is the standard way
+                 to get a progress fill without a value-to-width converter. -->
+            <Style x:Key="SliderFill" TargetType="RepeatButton">
+                <Setter Property="OverridesDefaultStyle" Value="True" />
+                <Setter Property="Focusable" Value="False" />
+                <Setter Property="IsTabStop" Value="False" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="RepeatButton">
+                            <Border Background="{StaticResource Accent}"
+                                    Height="3"
+                                    CornerRadius="2"
+                                    VerticalAlignment="Center" />
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <Style x:Key="SliderTrack" TargetType="RepeatButton">
+                <Setter Property="OverridesDefaultStyle" Value="True" />
+                <Setter Property="Focusable" Value="False" />
+                <Setter Property="IsTabStop" Value="False" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="RepeatButton">
+                            <Border Background="#26FFFFFF"
+                                    Height="3"
+                                    CornerRadius="2"
+                                    VerticalAlignment="Center" />
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <Style x:Key="MediaSlider" TargetType="Slider">
+                <Setter Property="Height" Value="18" />
+                <Setter Property="Minimum" Value="0" />
+                <Setter Property="IsMoveToPointEnabled" Value="True" />
+                <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="Slider">
+                            <Grid Background="Transparent" VerticalAlignment="Center">
+                                <Track x:Name="PART_Track">
+                                    <Track.DecreaseRepeatButton>
+                                        <RepeatButton Style="{StaticResource SliderFill}"
+                                                      Command="Slider.DecreaseLarge" />
+                                    </Track.DecreaseRepeatButton>
+                                    <Track.Thumb>
+                                        <Thumb Style="{StaticResource SliderThumb}" />
+                                    </Track.Thumb>
+                                    <Track.IncreaseRepeatButton>
+                                        <RepeatButton Style="{StaticResource SliderTrack}"
+                                                      Command="Slider.IncreaseLarge" />
+                                    </Track.IncreaseRepeatButton>
+                                </Track>
+                            </Grid>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <Style x:Key="TransportButton" TargetType="Button" BasedOn="{StaticResource IconButton}">
+                <Setter Property="Width" Value="30" />
+                <Setter Property="Height" Value="30" />
+                <Setter Property="FontSize" Value="12" />
+                <Setter Property="Foreground" Value="{StaticResource InkMuted}" />
+            </Style>
+
+            <Style x:Key="PlayButton" TargetType="Button" BasedOn="{StaticResource IconButton}">
+                <Setter Property="Width" Value="38" />
+                <Setter Property="Height" Value="38" />
+                <Setter Property="FontSize" Value="15" />
+                <Setter Property="Foreground" Value="{StaticResource Ink}" />
+            </Style>
+
+            <Style x:Key="ViewerButton" TargetType="Button" BasedOn="{StaticResource IconButton}">
+                <Setter Property="Width" Value="38" />
+                <Setter Property="Height" Value="38" />
+                <Setter Property="FontSize" Value="14" />
+                <Setter Property="Foreground" Value="{StaticResource InkMuted}" />
+            </Style>
+
+            <!-- Large hit targets that stay put and grey out at the ends of the reel,
+                 rather than vanishing and shifting what your cursor is over. -->
+            <Style x:Key="ViewerNavButton" TargetType="Button" BasedOn="{StaticResource IconButton}">
+                <Setter Property="Width" Value="52" />
+                <Setter Property="Height" Value="52" />
+                <Setter Property="FontSize" Value="17" />
+                <Setter Property="Background" Value="#99141312" />
+                <Setter Property="Foreground" Value="{StaticResource Ink}" />
+            </Style>
+
+            <Style x:Key="ViewerTextButton" TargetType="Button">
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="Foreground" Value="{StaticResource Ink}" />
+                <Setter Property="FontFamily" Value="{StaticResource UIFont}" />
+                <Setter Property="FontSize" Value="12" />
+                <Setter Property="Height" Value="32" />
+                <Setter Property="Padding" Value="16,0" />
+                <Setter Property="Margin" Value="6,0,0,0" />
+                <Setter Property="Cursor" Value="Hand" />
+                <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="Button">
+                            <Border x:Name="Root"
+                                    Background="{TemplateBinding Background}"
+                                    BorderBrush="{StaticResource Line}"
+                                    BorderThickness="1"
+                                    CornerRadius="8">
+                                <ContentPresenter Margin="{TemplateBinding Padding}"
+                                                  HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center" />
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Root" Property="Background" Value="{StaticResource Hover}" />
+                                </Trigger>
+                                <Trigger Property="IsEnabled" Value="False">
+                                    <Setter Property="Foreground" Value="{StaticResource InkDisabled}" />
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <Style x:Key="ViewerTextButtonPrimary" TargetType="Button" BasedOn="{StaticResource ViewerTextButton}">
+                <Setter Property="Background" Value="{StaticResource AccentSoft}" />
+                <Setter Property="Foreground" Value="{StaticResource Accent}" />
+            </Style>
 
             <!-- ============ Text entry ============ -->
 

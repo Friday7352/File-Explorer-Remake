@@ -11,6 +11,7 @@
     <AssemblyName>Clearspace</AssemblyName>
     <RootNamespace>Clearspace</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Clearspace.ico</ApplicationIcon>
 
     <Platforms>x64</Platforms>
     <PlatformTarget>x64</PlatformTarget>
@@ -29,5 +30,11 @@
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
     <DebugType>portable</DebugType>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The executable resource supplies the taskbar icon; this packaged copy is
+         what WPF uses for the window chrome and Alt+Tab icon. -->
+    <Resource Include="Assets\Clearspace.ico" />
+  </ItemGroup>
 
 </Project>

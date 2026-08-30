@@ -42,6 +42,93 @@ public sealed class FileSystemItem : ObservableObject
     public bool IsShortcut => !IsFolder &&
         Extension.Equals(".lnk", StringComparison.OrdinalIgnoreCase);
 
+    public bool IsAudio => !IsFolder && MediaTypes.IsAudio(Extension);
+
+    public bool IsImageFile => !IsFolder && MediaTypes.IsImage(Extension);
+
+    // ---------- Tags ----------
+
+    private IReadOnlyList<TagDefinition> _tags = [];
+
+    /// <summary>Tags attached to this path, resolved for display.</summary>
+    public IReadOnlyList<TagDefinition> Tags
+    {
+        get => _tags;
+        internal set
+        {
+            if (SetProperty(ref _tags, value))
+            {
+                OnPropertyChanged(nameof(HasTags));
+                OnPropertyChanged(nameof(TagNames));
+            }
+        }
+    }
+
+    public bool HasTags => _tags.Count > 0;
+
+    public string TagNames => string.Join(", ", _tags.Select(tag => tag.Name));
+
+    /// <summary>Re-reads this item's tags from the store.</summary>
+    internal void RefreshTags() => Tags = TagService.TagsFor(FullPath);
+
+    // ---------- Audio tags, filled in lazily for Music folders ----------
+
+    private string? _mediaTitle;
+    private string? _artist;
+    private string? _album;
+    private uint _trackNumber;
+    private TimeSpan _duration;
+
+    public bool HasMediaInfo { get; private set; }
+
+    /// <summary>The tagged title when there is one, otherwise the bare file name.</summary>
+    public string DisplayTitle => string.IsNullOrWhiteSpace(_mediaTitle)
+        ? Path.GetFileNameWithoutExtension(Name)
+        : _mediaTitle;
+
+    public string Artist => _artist ?? string.Empty;
+
+    public string Album => _album ?? string.Empty;
+
+    public string TrackNumberText => _trackNumber > 0 ? _trackNumber.ToString() : string.Empty;
+
+    public uint TrackNumber => _trackNumber;
+
+    public TimeSpan Duration => _duration;
+
+    public string DurationText => _duration <= TimeSpan.Zero
+        ? string.Empty
+        : _duration.TotalHours >= 1
+            ? _duration.ToString(@"h\:mm\:ss")
+            : _duration.ToString(@"m\:ss");
+
+    private bool _isNowPlaying;
+    /// <summary>Drives the row highlight for the track the player is on.</summary>
+    public bool IsNowPlaying
+    {
+        get => _isNowPlaying;
+        set => SetProperty(ref _isNowPlaying, value);
+    }
+
+    internal void ApplyMediaInfo(MediaPropertyService.MediaInfo info)
+    {
+        _mediaTitle = info.Title;
+        _artist = info.Artist;
+        _album = info.Album;
+        _trackNumber = info.TrackNumber;
+        _duration = info.Duration;
+        HasMediaInfo = true;
+
+        OnPropertyChanged(nameof(DisplayTitle));
+        OnPropertyChanged(nameof(Artist));
+        OnPropertyChanged(nameof(Album));
+        OnPropertyChanged(nameof(TrackNumberText));
+        OnPropertyChanged(nameof(TrackNumber));
+        OnPropertyChanged(nameof(Duration));
+        OnPropertyChanged(nameof(DurationText));
+        OnPropertyChanged(nameof(HasMediaInfo));
+    }
+
     public string Extension => IsFolder ? string.Empty : Path.GetExtension(Name);
 
     public string SizeText => IsDriveRoot
@@ -52,16 +139,34 @@ public sealed class FileSystemItem : ObservableObject
         ? 0
         : Math.Clamp((DriveTotalSpace - DriveAvailableSpace) * 100d / DriveTotalSpace, 0, 100);
 
+    // Frozen and shared. A property getter that returns a new brush allocates on
+    // every binding evaluation, and an unfrozen brush forces WPF to track it for
+    // changes on the UI thread instead of reusing one render resource.
+    private static readonly Brush DriveFullBrush = Frozen(Color.FromRgb(214, 95, 84));
+    private static readonly Brush DriveWarnBrush = Frozen(Color.FromRgb(211, 161, 95));
+    private static readonly Brush DriveOkBrush = Frozen(Color.FromRgb(112, 178, 132));
+
+    private static Brush Frozen(Color color)
+    {
+        var brush = new SolidColorBrush(color);
+        brush.Freeze();
+        return brush;
+    }
+
     public Brush DriveUsageBrush => DriveUsagePercent switch
     {
-        >= 90 => new SolidColorBrush(Color.FromRgb(214, 95, 84)),
-        >= 75 => new SolidColorBrush(Color.FromRgb(211, 161, 95)),
-        _ => new SolidColorBrush(Color.FromRgb(112, 178, 132))
+        >= 90 => DriveFullBrush,
+        >= 75 => DriveWarnBrush,
+        _ => DriveOkBrush
     };
 
     public string DateModifiedText => DateModified == DateTime.MinValue
         ? string.Empty
         : DateModified.ToString("g");
+
+    public string DateCreatedText => DateCreated == DateTime.MinValue
+        ? string.Empty
+        : DateCreated.ToString("g");
 
     private string? _typeName;
     public string TypeName

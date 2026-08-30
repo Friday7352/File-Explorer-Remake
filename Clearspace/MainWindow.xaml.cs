@@ -1,4 +1,5 @@
 using System.IO;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
@@ -21,6 +22,10 @@ public partial class MainWindow : Window
     private Button? _sidebarDragSource;
     private Point _sidebarDragStart;
     private string? _editingCategoryId;
+    private bool _isPanningViewer;
+    private Point _viewerPanOrigin;
+    private double _viewerPanHorizontalOffset;
+    private double _viewerPanVerticalOffset;
 
     public MainWindow()
     {
@@ -36,17 +41,168 @@ public partial class MainWindow : Window
 
         Loaded += OnLoaded;
         PreviewKeyDown += OnPreviewKeyDown;
+        PreviewMouseDown += OnWindowMouseDown;
         PreviewMouseMove += OnSidebarMouseMove;
         PreviewMouseLeftButtonUp += OnSidebarMouseUp;
+
+        _viewModel.ColumnsChanged += (_, _) => ApplyColumns();
+        _viewModel.Viewer.ZoomChanged += OnViewerZoomChanged;
+        _viewModel.Viewer.FileChanged += (_, _) => _ = _viewModel.RefreshAsync();
+        SizeChanged += (_, _) => UpdateViewerSize();
+
+        // The style trigger swaps View between the details GridView and null for
+        // tiles. DetailsView is x:Shared="False", so coming back from tiles builds
+        // a brand new empty GridView; without this the list would render column-less
+        // rows that are invisible but still selectable.
+        DependencyPropertyDescriptor
+            .FromProperty(ListView.ViewProperty, typeof(ListView))
+            .AddValueChanged(FileList, (_, _) => ApplyColumns());
     }
+
+    // ---------- Columns ----------
+
+    /// <summary>
+    /// Rebuilds the details columns from the user's choice for this folder type.
+    /// GridViewColumn is a real element with a parent, so the columns are pulled
+    /// fresh from the resource dictionary (all marked x:Shared="False") rather than
+    /// reused, which would throw once a column had been added to a second view.
+    /// </summary>
+    private void ApplyColumns()
+    {
+        if (FileList.View is not GridView view)
+            return;
+
+        view.Columns.Clear();
+
+        foreach (var id in _viewModel.VisibleColumns)
+        {
+            var info = ColumnCatalog.Find(id);
+            if (info is null)
+                continue;
+
+            if (TryFindResource(info.ResourceKey) is GridViewColumn column)
+                view.Columns.Add(column);
+        }
+    }
+
+    private void OnColumnsButtonClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { ContextMenu: { } menu } button)
+            return;
+
+        menu.PlacementTarget = button;
+        menu.IsOpen = true;
+    }
+
+    private void OnResetColumns(object sender, RoutedEventArgs e) => _viewModel.ResetColumns();
+
+    // ---------- Tags ----------
+
+    /// <summary>
+    /// Rebuilds the Tags submenu each time it opens: the tag list, then the commands
+    /// that act on it. Check state has to be recomputed anyway, since it reflects
+    /// the current selection rather than the tag itself.
+    /// </summary>
+    private void OnTagsSubmenuOpened(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem menu)
+            return;
+
+        // SubmenuOpened bubbles, so opening the nested Delete tag list raises it
+        // again on this item. Without this guard the rebuild below would clear the
+        // very submenu that was opening and collapse the whole menu.
+        if (!ReferenceEquals(e.OriginalSource, menu))
+            return;
+
+        menu.Items.Clear();
+
+        foreach (var option in _viewModel.TagOptions)
+        {
+            var entry = new MenuItem
+            {
+                Header = option.Name,
+                IsCheckable = true,
+                IsChecked = option.IsApplied,
+                // Stay open so several tags can be set in one visit.
+                StaysOpenOnClick = true,
+                DataContext = option
+            };
+
+            entry.Click += OnTagChecked;
+            menu.Items.Add(entry);
+        }
+
+        if (_viewModel.TagOptions.Count > 0)
+            menu.Items.Add(new Separator());
+
+        var create = new MenuItem { Header = "New tag…" };
+        create.Click += OnCreateTag;
+        menu.Items.Add(create);
+
+        var clear = new MenuItem { Header = "Clear tags", IsEnabled = _viewModel.Context.HasSelection };
+        clear.Click += OnClearTags;
+        menu.Items.Add(clear);
+
+        var delete = new MenuItem { Header = "Delete tag", IsEnabled = _viewModel.TagOptions.Count > 0 };
+
+        foreach (var option in _viewModel.TagOptions)
+        {
+            var entry = new MenuItem { Header = option.Name, DataContext = option };
+            entry.Click += OnDeleteTag;
+            delete.Items.Add(entry);
+        }
+
+        menu.Items.Add(delete);
+    }
+
+    private void OnTagChecked(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuItem { DataContext: TagOption option } item)
+            option.IsApplied = item.IsChecked;
+    }
+
+    private void OnDeleteTag(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MenuItem { DataContext: TagOption option })
+            return;
+
+        var confirm = MessageBox.Show(
+            $"Delete the {option.Name} tag?\n\nIt will be removed from everything currently tagged with it. Files themselves are not affected.",
+            "Delete tag",
+            MessageBoxButton.OKCancel,
+            MessageBoxImage.Question);
+
+        if (confirm == MessageBoxResult.OK)
+            _viewModel.DeleteTag(option.Tag);
+    }
+
+    private void OnCreateTag(object sender, RoutedEventArgs e)
+    {
+        _editingCategoryId = null;
+        CategoryPanelTitle.Text = "New tag";
+        CategoryBox.Text = string.Empty;
+        CategoryPanel.Visibility = Visibility.Visible;
+        CategoryBox.Focus();
+        _isNamingTag = true;
+    }
+
+    private void OnClearTags(object sender, RoutedEventArgs e) => _viewModel.ClearTagsOnSelection();
+
+    /// <summary>
+    /// The name panel is shared between categories and tags, so this flag decides
+    /// which one a confirmed name creates.
+    /// </summary>
+    private bool _isNamingTag;
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         var handle = new WindowInteropHelper(this).Handle;
         _viewModel.Context.OwnerHandle = handle;
+        _viewModel.Viewer.OwnerHandle = handle;
 
         ApplyDarkTitleBar(handle);
         HookColumnHeaders();
+        ApplyColumns();
 
         _viewModel.Start();
         FileList.Focus();
@@ -73,9 +229,81 @@ public partial class MainWindow : Window
     /// </summary>
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) != 0)
+        {
+            SearchBox.Focus();
+            SearchBox.SelectAll();
+            e.Handled = true;
+            return;
+        }
+
         // Let text entry keep its own keys.
         if (Keyboard.FocusedElement is TextBox)
             return;
+
+        // The viewer owns the keyboard while it is up, so Delete and F2 cannot
+        // fire against a list the user cannot currently see.
+        if (_viewModel.Viewer.IsOpen)
+        {
+            var viewer = _viewModel.Viewer;
+            var control = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
+
+            switch (e.Key)
+            {
+                case Key.Escape:
+                    if (viewer.IsCropping)
+                    {
+                        HideCropRectangle();
+                        viewer.CancelCrop();
+                    }
+                    else
+                    {
+                        EndViewerPan();
+                        viewer.Close();
+                        FileList.Focus();
+                    }
+                    break;
+                case Key.Left:
+                    viewer.Previous();
+                    break;
+                case Key.Right:
+                case Key.Space:
+                    viewer.Next();
+                    break;
+                case Key.OemPlus or Key.Add:
+                    viewer.ZoomBy(1.25);
+                    break;
+                case Key.OemMinus or Key.Subtract:
+                    viewer.ZoomBy(1 / 1.25);
+                    break;
+                case Key.D0 or Key.NumPad0:
+                    viewer.FitToWindow();
+                    break;
+                case Key.D1 or Key.NumPad1:
+                    viewer.ActualSize();
+                    break;
+                case Key.Delete:
+                    viewer.DeleteCurrent();
+                    break;
+                case Key.C when control:
+                    viewer.CopyImage();
+                    break;
+                default:
+                    return;
+            }
+
+            e.Handled = true;
+            return;
+        }
+
+        // Space is play/pause whenever something is loaded, which is the one
+        // shortcut people expect a player to own.
+        if (e.Key == Key.Space && _viewModel.Player.IsActive)
+        {
+            _viewModel.Player.TogglePlay();
+            e.Handled = true;
+            return;
+        }
 
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
         var command = _viewModel.Commands.TryGetByHotKey(new HotKey(key, Keyboard.Modifiers));
@@ -84,6 +312,55 @@ public partial class MainWindow : Window
             return;
 
         command.Execute(null);
+        e.Handled = true;
+    }
+
+    private void OnSearchKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape)
+            return;
+
+        _viewModel.SearchText = string.Empty;
+        FileList.Focus();
+        e.Handled = true;
+    }
+
+    private void OnClearSearch(object sender, RoutedEventArgs e)
+    {
+        _viewModel.SearchText = string.Empty;
+        SearchBox.Focus();
+    }
+
+    /// <summary>
+    /// Standard mouse side buttons mirror Explorer navigation. In the photo reel
+    /// they move between photos instead, keeping the viewer open and useful.
+    /// </summary>
+    private void OnWindowMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton is not (MouseButton.XButton1 or MouseButton.XButton2))
+            return;
+
+        if (_viewModel.Viewer.IsOpen)
+        {
+            if (!_viewModel.Viewer.IsCropping)
+            {
+                if (e.ChangedButton == MouseButton.XButton1)
+                    _viewModel.Viewer.Previous();
+                else
+                    _viewModel.Viewer.Next();
+            }
+
+            e.Handled = true;
+            return;
+        }
+
+        var command = e.ChangedButton == MouseButton.XButton1
+            ? _viewModel.BackCommand
+            : _viewModel.ForwardCommand;
+
+        if (command.CanExecute(null))
+            command.Execute(null);
+
         e.Handled = true;
     }
 
@@ -184,6 +461,7 @@ public partial class MainWindow : Window
 
     private void BeginCategoryEdit(string? categoryId, string name)
     {
+        _isNamingTag = false;
         _editingCategoryId = categoryId;
         CategoryPanelTitle.Text = categoryId is null ? "New category" : "Rename category";
         CategoryBox.Text = name;
@@ -212,7 +490,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(_editingCategoryId))
+        if (_isNamingTag)
+            _viewModel.CreateTagForSelection(name);
+        else if (string.IsNullOrWhiteSpace(_editingCategoryId))
             _viewModel.CreatePinnedCategory(name);
         else
             _viewModel.RenameSidebarSection(_editingCategoryId, name);
@@ -224,6 +504,7 @@ public partial class MainWindow : Window
     {
         CategoryPanel.Visibility = Visibility.Collapsed;
         _editingCategoryId = null;
+        _isNamingTag = false;
         FileList.Focus();
     }
 
@@ -366,6 +647,29 @@ public partial class MainWindow : Window
 
     private void OnToggleLayout(object sender, RoutedEventArgs e) => _viewModel.ToggleLayout();
 
+    private void OnFolderProfileButtonClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { ContextMenu: { } menu } button)
+            return;
+
+        menu.PlacementTarget = button;
+        menu.IsOpen = true;
+    }
+
+    private void OnFolderProfileSelected(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuItem { Tag: string value } &&
+            Enum.TryParse<DirectoryViewProfile>(value, out var profile))
+            _viewModel.SetFolderProfile(profile);
+    }
+
+    private void OnSelectedFolderProfile(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuItem { Tag: string value } &&
+            Enum.TryParse<DirectoryViewProfile>(value, out var profile))
+            _viewModel.SetFolderProfilesForSelection(profile);
+    }
+
     private void OnZoomIn(object sender, RoutedEventArgs e) => _viewModel.AdjustTileScale(0.15);
 
     private void OnZoomOut(object sender, RoutedEventArgs e) => _viewModel.AdjustTileScale(-0.15);
@@ -417,8 +721,362 @@ public partial class MainWindow : Window
         if (FindAncestor<ListViewItem>(e.OriginalSource as DependencyObject) is null)
             return;
 
+        // Always the normal thing: folders navigate, files go to their default app.
+        // In-app playback and viewing are opt-in through their own buttons.
         _viewModel.OpenCommand.Execute(null);
     }
+
+    private void OnPlayTrackClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { DataContext: FileSystemItem item })
+            return;
+
+        // If this row is already the one loaded, treat the button as play/pause.
+        if (ReferenceEquals(_viewModel.Player.Current, item))
+            _viewModel.Player.TogglePlay();
+        else
+            _viewModel.PlayTrack(item);
+
+        // Otherwise the click would also select the row underneath.
+        e.Handled = true;
+    }
+
+    private void OnViewPhotoClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: FileSystemItem item })
+            _viewModel.ViewPhoto(item);
+
+        e.Handled = true;
+    }
+
+    // ---------- Music ----------
+
+    private void OnMusicRowDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        // Only Music folders pay for tag reads; elsewhere the columns would never
+        // show the result anyway.
+        if (_viewModel.IsMusicProfile && e.NewValue is FileSystemItem item)
+            MediaPropertyService.Request(item);
+    }
+
+    private void OnMusicRowLoaded(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel.IsMusicProfile && sender is FrameworkElement { DataContext: FileSystemItem item })
+            MediaPropertyService.Request(item);
+    }
+
+    private void OnPlayerTogglePlay(object sender, RoutedEventArgs e) => _viewModel.Player.TogglePlay();
+
+    private void OnPlayerNext(object sender, RoutedEventArgs e) => _viewModel.Player.Next();
+
+    private void OnPlayerPrevious(object sender, RoutedEventArgs e) => _viewModel.Player.Previous();
+
+    private void OnPlayerStop(object sender, RoutedEventArgs e) => _viewModel.Player.Stop();
+
+    // While the thumb is held the ticker must not overwrite the value under the
+    // user's cursor; the seek is committed on release.
+    private void OnSeekStart(object sender, MouseButtonEventArgs e) => _viewModel.Player.BeginScrub();
+
+    private void OnSeekEnd(object sender, MouseButtonEventArgs e) => _viewModel.Player.EndScrub();
+
+    // ---------- Photo viewer ----------
+
+    private Point _cropOrigin;
+    private bool _isDraggingCrop;
+
+    /// <summary>
+    /// Sizes the image explicitly rather than letting Stretch do it, because the
+    /// crop overlay has to sit exactly on the pixels and map back to source
+    /// coordinates. Fit mode computes the scale that just fits the viewport.
+    /// </summary>
+    private void UpdateViewerSize()
+    {
+        var viewer = _viewModel.Viewer;
+        var image = viewer.Image;
+
+        if (image is null || !viewer.IsOpen)
+            return;
+
+        double scale;
+
+        if (viewer.IsFitToWindow)
+        {
+            var availableWidth = Math.Max(1, ViewerScroll.ViewportWidth - 40);
+            var availableHeight = Math.Max(1, ViewerScroll.ViewportHeight - 40);
+
+            scale = Math.Min(availableWidth / image.PixelWidth, availableHeight / image.PixelHeight);
+
+            // Never blow a small photo up just to fill the window.
+            scale = Math.Min(scale, 1);
+            viewer.SeedZoom(scale);
+        }
+        else
+        {
+            scale = viewer.Zoom;
+        }
+
+        ViewerImage.Width = Math.Max(1, image.PixelWidth * scale);
+        ViewerImage.Height = Math.Max(1, image.PixelHeight * scale);
+    }
+
+    private void OnViewerZoomChanged(object? sender, EventArgs e)
+        => Dispatcher.BeginInvoke(new Action(UpdateViewerSize), System.Windows.Threading.DispatcherPriority.Loaded);
+
+    private void OnViewerMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        var viewer = _viewModel.Viewer;
+
+        if (!viewer.IsOpen || viewer.IsCropping)
+            return;
+
+        e.Handled = true;
+
+        if (viewer.Image is null)
+            return;
+
+        // Which point of the image is under the cursor, as a 0..1 fraction. This
+        // survives the resize; pixel offsets would not.
+        var onImage = e.GetPosition(ViewerImage);
+        var fractionX = ViewerImage.ActualWidth > 0
+            ? Math.Clamp(onImage.X / ViewerImage.ActualWidth, 0, 1)
+            : 0.5;
+        var fractionY = ViewerImage.ActualHeight > 0
+            ? Math.Clamp(onImage.Y / ViewerImage.ActualHeight, 0, 1)
+            : 0.5;
+
+        // Where that point currently sits in the viewport, so it can be put back.
+        var inViewport = e.GetPosition(ViewerScroll);
+
+        viewer.ZoomBy(e.Delta > 0 ? 1.15 : 1 / 1.15);
+
+        // Resize and lay out now rather than waiting for the queued pass, because
+        // the offsets below have to be measured against the new size.
+        UpdateViewerSize();
+        ViewerScroll.UpdateLayout();
+
+        // The stage's margin offsets the image inside the scrollable content.
+        var originX = ViewerStage.Margin.Left;
+        var originY = ViewerStage.Margin.Top;
+
+        ViewerScroll.ScrollToHorizontalOffset(fractionX * ViewerImage.ActualWidth + originX - inViewport.X);
+        ViewerScroll.ScrollToVerticalOffset(fractionY * ViewerImage.ActualHeight + originY - inViewport.Y);
+    }
+
+    /// <summary>
+    /// A click on the empty space around the photo dismisses the viewer, the same
+    /// as the close button. Clicks that land on the photo itself only take focus,
+    /// so the keyboard shortcuts keep working after using a toolbar button.
+    ///
+    /// This is a tunnelling handler on purpose. ScrollViewer has a class handler
+    /// for MouseLeftButtonDown that focuses itself and marks the event handled,
+    /// and class handlers run before instance ones, so a bubbling handler here
+    /// would never be called.
+    /// </summary>
+    private void OnViewerSurfaceDown(object sender, MouseButtonEventArgs e)
+    {
+        ViewerScroll.Focus();
+
+        // Mid-crop the backdrop is part of the tool, not a way out.
+        if (_viewModel.Viewer.IsCropping)
+            return;
+
+        var point = e.GetPosition(ViewerImage);
+
+        var onImage = point.X >= 0 &&
+                      point.Y >= 0 &&
+                      point.X <= ViewerImage.ActualWidth &&
+                      point.Y <= ViewerImage.ActualHeight;
+
+        if (onImage)
+            return;
+
+        EndViewerPan();
+        _viewModel.Viewer.Close();
+        FileList.Focus();
+        e.Handled = true;
+    }
+
+    /// <summary>
+    /// Middle-mouse drag pans the viewer directly. It uses the ScrollViewer's
+    /// native offsets, so it remains smooth for very large images and does not
+    /// create another render layer or duplicate the bitmap.
+    /// </summary>
+    private void OnViewerSurfaceMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Middle ||
+            !_viewModel.Viewer.IsOpen ||
+            _viewModel.Viewer.IsCropping)
+            return;
+
+        _isPanningViewer = true;
+        _viewerPanOrigin = e.GetPosition(ViewerScroll);
+        _viewerPanHorizontalOffset = ViewerScroll.HorizontalOffset;
+        _viewerPanVerticalOffset = ViewerScroll.VerticalOffset;
+        ViewerScroll.CaptureMouse();
+        ViewerScroll.Cursor = Cursors.ScrollAll;
+        e.Handled = true;
+    }
+
+    private void OnViewerSurfaceMouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_isPanningViewer || e.MiddleButton != MouseButtonState.Pressed)
+            return;
+
+        var point = e.GetPosition(ViewerScroll);
+        ViewerScroll.ScrollToHorizontalOffset(_viewerPanHorizontalOffset - (point.X - _viewerPanOrigin.X));
+        ViewerScroll.ScrollToVerticalOffset(_viewerPanVerticalOffset - (point.Y - _viewerPanOrigin.Y));
+        e.Handled = true;
+    }
+
+    private void OnViewerSurfaceMouseUp(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Middle || !_isPanningViewer)
+            return;
+
+        EndViewerPan();
+        e.Handled = true;
+    }
+
+    private void OnViewerSurfaceLostMouseCapture(object sender, MouseEventArgs e) => EndViewerPan();
+
+    private void EndViewerPan()
+    {
+        if (!_isPanningViewer)
+            return;
+
+        _isPanningViewer = false;
+        if (Mouse.Captured == ViewerScroll)
+            ViewerScroll.ReleaseMouseCapture();
+        ViewerScroll.Cursor = null;
+    }
+
+    private void OnViewerZoomIn(object sender, RoutedEventArgs e) => _viewModel.Viewer.ZoomBy(1.25);
+
+    private void OnViewerZoomOut(object sender, RoutedEventArgs e) => _viewModel.Viewer.ZoomBy(1 / 1.25);
+
+    private void OnViewerFit(object sender, RoutedEventArgs e) => _viewModel.Viewer.FitToWindow();
+
+    private void OnViewerActualSize(object sender, RoutedEventArgs e) => _viewModel.Viewer.ActualSize();
+
+    private void OnViewerRotateLeft(object sender, RoutedEventArgs e) => _viewModel.Viewer.Rotate(270);
+
+    private void OnViewerRotateRight(object sender, RoutedEventArgs e) => _viewModel.Viewer.Rotate(90);
+
+    private void OnViewerCopyImage(object sender, RoutedEventArgs e) => _viewModel.Viewer.CopyImage();
+
+    private void OnViewerCopyPath(object sender, RoutedEventArgs e) => _viewModel.Viewer.CopyPath();
+
+    private void OnViewerOpenWith(object sender, RoutedEventArgs e) => _viewModel.Viewer.OpenWith();
+
+    private void OnViewerShowInFolder(object sender, RoutedEventArgs e) => _viewModel.Viewer.ShowInFolder();
+
+    private void OnViewerDelete(object sender, RoutedEventArgs e) => _viewModel.Viewer.DeleteCurrent();
+
+    // ---------- Crop ----------
+
+    private void OnViewerCrop(object sender, RoutedEventArgs e)
+    {
+        HideCropRectangle();
+        _viewModel.Viewer.BeginCrop();
+    }
+
+    private void OnCropDown(object sender, MouseButtonEventArgs e)
+    {
+        _cropOrigin = e.GetPosition(CropLayer);
+        _isDraggingCrop = true;
+        CropLayer.CaptureMouse();
+
+        Canvas.SetLeft(CropRectangle, _cropOrigin.X);
+        Canvas.SetTop(CropRectangle, _cropOrigin.Y);
+        CropRectangle.Width = 0;
+        CropRectangle.Height = 0;
+        CropRectangle.Visibility = Visibility.Visible;
+    }
+
+    private void OnCropMove(object sender, MouseEventArgs e)
+    {
+        if (!_isDraggingCrop)
+            return;
+
+        var point = e.GetPosition(CropLayer);
+        var left = Math.Max(0, Math.Min(_cropOrigin.X, point.X));
+        var top = Math.Max(0, Math.Min(_cropOrigin.Y, point.Y));
+        var right = Math.Min(CropLayer.ActualWidth, Math.Max(_cropOrigin.X, point.X));
+        var bottom = Math.Min(CropLayer.ActualHeight, Math.Max(_cropOrigin.Y, point.Y));
+
+        Canvas.SetLeft(CropRectangle, left);
+        Canvas.SetTop(CropRectangle, top);
+        CropRectangle.Width = Math.Max(0, right - left);
+        CropRectangle.Height = Math.Max(0, bottom - top);
+    }
+
+    private void OnCropUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_isDraggingCrop)
+            return;
+
+        _isDraggingCrop = false;
+        CropLayer.ReleaseMouseCapture();
+        CommitCropSelection();
+    }
+
+    /// <summary>Converts the on-screen rectangle into source pixels.</summary>
+    private void CommitCropSelection()
+    {
+        var image = _viewModel.Viewer.Image;
+
+        if (image is null || CropLayer.ActualWidth < 1 || CropLayer.ActualHeight < 1)
+            return;
+
+        var scaleX = image.PixelWidth / CropLayer.ActualWidth;
+        var scaleY = image.PixelHeight / CropLayer.ActualHeight;
+
+        var left = Canvas.GetLeft(CropRectangle);
+        var top = Canvas.GetTop(CropRectangle);
+
+        _viewModel.Viewer.CropRegion = new Int32Rect(
+            (int)Math.Round(left * scaleX),
+            (int)Math.Round(top * scaleY),
+            (int)Math.Round(CropRectangle.Width * scaleX),
+            (int)Math.Round(CropRectangle.Height * scaleY));
+    }
+
+    private void HideCropRectangle()
+    {
+        CropRectangle.Visibility = Visibility.Collapsed;
+        CropRectangle.Width = 0;
+        CropRectangle.Height = 0;
+    }
+
+    private void OnCropCancel(object sender, RoutedEventArgs e)
+    {
+        HideCropRectangle();
+        _viewModel.Viewer.CancelCrop();
+    }
+
+    private void OnCropSaveCopy(object sender, RoutedEventArgs e)
+    {
+        _viewModel.Viewer.CommitCrop(asCopy: true);
+        HideCropRectangle();
+    }
+
+    private void OnCropOverwrite(object sender, RoutedEventArgs e)
+    {
+        _viewModel.Viewer.CommitCrop(asCopy: false);
+        HideCropRectangle();
+    }
+
+    private void OnViewerClose(object sender, RoutedEventArgs e)
+    {
+        EndViewerPan();
+        HideCropRectangle();
+        _viewModel.Viewer.Close();
+        FileList.Focus();
+    }
+
+    private void OnViewerNext(object sender, RoutedEventArgs e) => _viewModel.Viewer.Next();
+
+    private void OnViewerPrevious(object sender, RoutedEventArgs e) => _viewModel.Viewer.Previous();
 
     private void OnFileListRightClick(object sender, MouseButtonEventArgs e)
     {
@@ -596,8 +1254,14 @@ public partial class MainWindow : Window
         var column = header switch
         {
             "Date modified" => SortColumn.DateModified,
+            "Date created" => SortColumn.DateCreated,
             "Type" => SortColumn.Type,
             "Size" => SortColumn.Size,
+            "Title" => SortColumn.Title,
+            "Artist" => SortColumn.Artist,
+            "Album" => SortColumn.Album,
+            "Length" => SortColumn.Duration,
+            "Track" => SortColumn.Track,
             _ => SortColumn.Name
         };
 

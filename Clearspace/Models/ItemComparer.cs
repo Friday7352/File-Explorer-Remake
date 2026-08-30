@@ -6,8 +6,14 @@ public enum SortColumn
 {
     Name,
     DateModified,
+    DateCreated,
     Type,
-    Size
+    Size,
+    Title,
+    Artist,
+    Album,
+    Duration,
+    Track
 }
 
 /// <summary>
@@ -39,8 +45,17 @@ public sealed class ItemComparer : IComparer<FileSystemItem>
         var result = _column switch
         {
             SortColumn.DateModified => x.DateModified.CompareTo(y.DateModified),
+            SortColumn.DateCreated => x.DateCreated.CompareTo(y.DateCreated),
             SortColumn.Size => x.Size.CompareTo(y.Size),
             SortColumn.Type => string.Compare(x.Extension, y.Extension, StringComparison.OrdinalIgnoreCase),
+            SortColumn.Title => NativeMethods.StrCmpLogicalW(x.DisplayTitle, y.DisplayTitle),
+            SortColumn.Artist => string.Compare(x.Artist, y.Artist, StringComparison.OrdinalIgnoreCase),
+            SortColumn.Duration => x.Duration.CompareTo(y.Duration),
+            SortColumn.Track => x.TrackNumber.CompareTo(y.TrackNumber),
+
+            // Album sorts by album then track, because an album listed out of
+            // track order is not really sorted by album at all.
+            SortColumn.Album => AlbumThenTrack(x, y),
             _ => 0
         };
 
@@ -49,5 +64,11 @@ public sealed class ItemComparer : IComparer<FileSystemItem>
             result = NativeMethods.StrCmpLogicalW(x.Name, y.Name);
 
         return _descending ? -result : result;
+    }
+
+    private static int AlbumThenTrack(FileSystemItem x, FileSystemItem y)
+    {
+        var album = string.Compare(x.Album, y.Album, StringComparison.OrdinalIgnoreCase);
+        return album != 0 ? album : x.TrackNumber.CompareTo(y.TrackNumber);
     }
 }

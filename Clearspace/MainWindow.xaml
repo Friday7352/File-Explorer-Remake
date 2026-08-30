@@ -16,12 +16,19 @@
 
     <Window.Resources>
 
-        <!-- Details columns, swapped out wholesale when tiles are active. -->
-        <GridView x:Key="DetailsView" x:Shared="False" ColumnHeaderContainerStyle="{StaticResource ColumnHeader}">
-            <GridViewColumn Width="400" Header="Name">
+        <!-- Columns are assembled at runtime from the user's choice, so the view
+             starts empty and MainWindow fills it. Each column below is a keyed
+             resource marked x:Shared="False", so every rebuild gets fresh instances
+             rather than re-parenting ones already in use. -->
+        <GridView x:Key="DetailsView" x:Shared="False" ColumnHeaderContainerStyle="{StaticResource ColumnHeader}" />
+
+        <!-- Name carries the per-row tag request, which is why it cannot be hidden. -->
+        <GridViewColumn x:Key="Col.Name" x:Shared="False" Width="400" Header="Name">
                 <GridViewColumn.CellTemplate>
                     <DataTemplate>
-                        <StackPanel Orientation="Horizontal">
+                        <StackPanel Orientation="Horizontal"
+                                    Loaded="OnMusicRowLoaded"
+                                    DataContextChanged="OnMusicRowDataContextChanged">
                             <Image Source="{Binding Icon}"
                                    Width="16" Height="16"
                                    Margin="6,0,11,0"
@@ -36,7 +43,7 @@
                 </GridViewColumn.CellTemplate>
             </GridViewColumn>
 
-            <GridViewColumn Width="180" Header="Date modified">
+        <GridViewColumn x:Key="Col.DateModified" x:Shared="False" Width="180" Header="Date modified">
                 <GridViewColumn.CellTemplate>
                     <DataTemplate>
                         <TextBlock Text="{Binding DateModifiedText}"
@@ -48,7 +55,7 @@
                 </GridViewColumn.CellTemplate>
             </GridViewColumn>
 
-            <GridViewColumn Width="160" Header="Type">
+        <GridViewColumn x:Key="Col.Type" x:Shared="False" Width="160" Header="Type">
                 <GridViewColumn.CellTemplate>
                     <DataTemplate>
                         <TextBlock Text="{Binding TypeName}"
@@ -60,7 +67,7 @@
                 </GridViewColumn.CellTemplate>
             </GridViewColumn>
 
-            <GridViewColumn Width="110" Header="Size">
+        <GridViewColumn x:Key="Col.Size" x:Shared="False" Width="110" Header="Size">
                 <GridViewColumn.CellTemplate>
                     <DataTemplate>
                         <TextBlock Text="{Binding SizeText}"
@@ -71,8 +78,215 @@
                                    Typography.NumeralAlignment="Tabular" />
                     </DataTemplate>
                 </GridViewColumn.CellTemplate>
+        </GridViewColumn>
+
+        <GridViewColumn x:Key="Col.Play" x:Shared="False" Width="46" Header="">
+                <GridViewColumn.CellTemplate>
+                    <DataTemplate>
+                        <Grid Margin="6,0,0,0"
+                              Loaded="OnMusicRowLoaded"
+                              DataContextChanged="OnMusicRowDataContextChanged">
+                            <!-- Track number until you hover, then the play button.
+                                 Folders get neither, which is part of telling them
+                                 apart at a glance. -->
+                            <TextBlock Text="{Binding TrackNumberText}"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"
+                                       Foreground="{StaticResource InkFaint}"
+                                       Typography.NumeralAlignment="Tabular">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Visibility" Value="Visible" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsNowPlaying}" Value="True">
+                                                <Setter Property="Visibility" Value="Collapsed" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding RelativeSource={RelativeSource AncestorType={x:Type ListViewItem}}, Path=IsMouseOver}" Value="True">
+                                                <Setter Property="Visibility" Value="Collapsed" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+
+                            <Button Click="OnPlayTrackClick"
+                                    ToolTip="Play in Clearspace"
+                                    Content="&#xE768;">
+                                <Button.Style>
+                                    <Style TargetType="Button" BasedOn="{StaticResource TransportButton}">
+                                        <Setter Property="Width" Value="26" />
+                                        <Setter Property="Height" Value="26" />
+                                        <Setter Property="FontSize" Value="10" />
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <MultiDataTrigger>
+                                                <MultiDataTrigger.Conditions>
+                                                    <Condition Binding="{Binding IsAudio}" Value="True" />
+                                                    <Condition Binding="{Binding RelativeSource={RelativeSource AncestorType={x:Type ListViewItem}}, Path=IsMouseOver}" Value="True" />
+                                                </MultiDataTrigger.Conditions>
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </MultiDataTrigger>
+                                            <MultiDataTrigger>
+                                                <MultiDataTrigger.Conditions>
+                                                    <Condition Binding="{Binding IsAudio}" Value="True" />
+                                                    <Condition Binding="{Binding IsNowPlaying}" Value="True" />
+                                                </MultiDataTrigger.Conditions>
+                                                <Setter Property="Visibility" Value="Visible" />
+                                                <Setter Property="Foreground" Value="{StaticResource Accent}" />
+                                            </MultiDataTrigger>
+                                            <!-- Declared last so it wins: the loaded
+                                                 track's button is a pause button. -->
+                                            <MultiDataTrigger>
+                                                <MultiDataTrigger.Conditions>
+                                                    <Condition Binding="{Binding IsNowPlaying}" Value="True" />
+                                                    <Condition Binding="{Binding DataContext.Player.IsPlaying, RelativeSource={RelativeSource AncestorType={x:Type ListView}}}" Value="True" />
+                                                </MultiDataTrigger.Conditions>
+                                                <Setter Property="Visibility" Value="Visible" />
+                                                <Setter Property="Foreground" Value="{StaticResource Accent}" />
+                                                <Setter Property="Content" Value="&#xE769;" />
+                                            </MultiDataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
+                        </Grid>
+                    </DataTemplate>
+                </GridViewColumn.CellTemplate>
             </GridViewColumn>
-        </GridView>
+
+        <GridViewColumn x:Key="Col.Title" x:Shared="False" Width="330" Header="Title">
+                <GridViewColumn.CellTemplate>
+                    <DataTemplate>
+                        <StackPanel Orientation="Horizontal">
+                            <!-- The icon is what separates an album folder from a
+                                 track. Without it every row reads the same. -->
+                            <Image Source="{Binding Icon}"
+                                   Width="16" Height="16"
+                                   Margin="2,0,10,0"
+                                   RenderOptions.BitmapScalingMode="HighQuality" />
+                            <TextBlock Text="{Binding DisplayTitle}"
+                                       FontFamily="{StaticResource SerifFont}"
+                                       FontSize="13"
+                                       VerticalAlignment="Center"
+                                       TextTrimming="CharacterEllipsis">
+                                <TextBlock.Style>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Foreground" Value="{StaticResource Ink}" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsNowPlaying}" Value="True">
+                                                <Setter Property="Foreground" Value="{StaticResource Accent}" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </StackPanel>
+                    </DataTemplate>
+                </GridViewColumn.CellTemplate>
+            </GridViewColumn>
+
+        <GridViewColumn x:Key="Col.Artist" x:Shared="False" Width="200" Header="Artist">
+                <GridViewColumn.CellTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding Artist}"
+                                   Foreground="{StaticResource InkMuted}"
+                                   Margin="10,0,0,0"
+                                   VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis" />
+                    </DataTemplate>
+                </GridViewColumn.CellTemplate>
+            </GridViewColumn>
+
+        <GridViewColumn x:Key="Col.Album" x:Shared="False" Width="200" Header="Album">
+                <GridViewColumn.CellTemplate>
+                    <DataTemplate>
+                        <!-- Folders say so plainly here, so an album folder is never
+                             mistaken for an untagged track with a blank album. -->
+                        <TextBlock Foreground="{StaticResource InkMuted}"
+                                   Margin="10,0,0,0"
+                                   VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Text" Value="{Binding Album}" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsFolder}" Value="True">
+                                            <Setter Property="Text" Value="Folder" />
+                                            <Setter Property="Foreground" Value="{StaticResource InkFaint}" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                    </DataTemplate>
+                </GridViewColumn.CellTemplate>
+            </GridViewColumn>
+
+        <GridViewColumn x:Key="Col.Length" x:Shared="False" Width="90" Header="Length">
+                <GridViewColumn.CellTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding DurationText}"
+                                   Foreground="{StaticResource InkMuted}"
+                                   Margin="0,0,14,0"
+                                   HorizontalAlignment="Right"
+                                   VerticalAlignment="Center"
+                                   Typography.NumeralAlignment="Tabular" />
+                    </DataTemplate>
+                </GridViewColumn.CellTemplate>
+        </GridViewColumn>
+
+        <GridViewColumn x:Key="Col.Track" x:Shared="False" Width="64" Header="Track">
+            <GridViewColumn.CellTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding TrackNumberText}"
+                               Foreground="{StaticResource InkMuted}"
+                               Margin="0,0,14,0"
+                               HorizontalAlignment="Right"
+                               VerticalAlignment="Center"
+                               Typography.NumeralAlignment="Tabular" />
+                </DataTemplate>
+            </GridViewColumn.CellTemplate>
+        </GridViewColumn>
+
+        <GridViewColumn x:Key="Col.DateCreated" x:Shared="False" Width="180" Header="Date created">
+            <GridViewColumn.CellTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding DateCreatedText}"
+                               Foreground="{StaticResource InkMuted}"
+                               Margin="10,0,0,0"
+                               VerticalAlignment="Center"
+                               Typography.NumeralAlignment="Tabular" />
+                </DataTemplate>
+            </GridViewColumn.CellTemplate>
+        </GridViewColumn>
+
+        <GridViewColumn x:Key="Col.Tags" x:Shared="False" Width="170" Header="Tags">
+            <GridViewColumn.CellTemplate>
+                <DataTemplate>
+                    <ItemsControl ItemsSource="{Binding Tags}"
+                                  Margin="10,0,0,0"
+                                  VerticalAlignment="Center">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Background="{Binding Brush}"
+                                        CornerRadius="4"
+                                        Padding="6,1"
+                                        Margin="0,0,4,0">
+                                    <TextBlock Text="{Binding Name}"
+                                               FontSize="10"
+                                               Foreground="#FF1A1917" />
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </DataTemplate>
+            </GridViewColumn.CellTemplate>
+        </GridViewColumn>
 
         <!-- Tile. DataContextChanged, not Loaded: containers are recycled during
              virtualisation, so the item changes without the visual reloading. -->
@@ -87,14 +301,45 @@
                 </Grid.RowDefinitions>
 
                 <Border Grid.Row="0" Background="#14000000" CornerRadius="7">
-                    <Image Source="{Binding GridImage}"
-                           Width="{Binding DataContext.TilePreviewSize, RelativeSource={RelativeSource AncestorType={x:Type ListView}}}"
-                           Height="{Binding DataContext.TilePreviewSize, RelativeSource={RelativeSource AncestorType={x:Type ListView}}}"
-                           HorizontalAlignment="Center"
-                           VerticalAlignment="Center"
-                           Stretch="Uniform"
-                           Margin="4"
-                           RenderOptions.BitmapScalingMode="HighQuality" />
+                    <Grid>
+                        <Image Source="{Binding GridImage}"
+                               Width="{Binding DataContext.TilePreviewSize, RelativeSource={RelativeSource AncestorType={x:Type ListView}}}"
+                               Height="{Binding DataContext.TilePreviewSize, RelativeSource={RelativeSource AncestorType={x:Type ListView}}}"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center"
+                               Stretch="Uniform"
+                               Margin="4"
+                               RenderOptions.BitmapScalingMode="HighQuality" />
+
+                        <!-- The Photos folder type's one affordance: open the reel
+                             without giving up ordinary double-click behaviour. -->
+                        <Button Click="OnViewPhotoClick"
+                                Content="&#xE8B3;"
+                                ToolTip="View in Clearspace"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Top"
+                                Margin="0,6,6,0">
+                            <Button.Style>
+                                <Style TargetType="Button" BasedOn="{StaticResource IconButton}">
+                                    <Setter Property="Width" Value="28" />
+                                    <Setter Property="Height" Value="28" />
+                                    <Setter Property="FontSize" Value="12" />
+                                    <Setter Property="Background" Value="#B3141312" />
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <MultiDataTrigger>
+                                            <MultiDataTrigger.Conditions>
+                                                <Condition Binding="{Binding IsImageFile}" Value="True" />
+                                                <Condition Binding="{Binding DataContext.IsPhotosProfile, RelativeSource={RelativeSource AncestorType={x:Type ListView}}}" Value="True" />
+                                                <Condition Binding="{Binding RelativeSource={RelativeSource AncestorType={x:Type ListViewItem}}, Path=IsMouseOver}" Value="True" />
+                                            </MultiDataTrigger.Conditions>
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </MultiDataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                        </Button>
+                    </Grid>
                 </Border>
 
                 <TextBlock Grid.Row="1"
@@ -204,6 +449,99 @@
             </Border>
 
             <StackPanel Grid.Column="2" Orientation="Horizontal">
+                <Border Width="228"
+                        Height="32"
+                        Margin="0,0,9,0"
+                        Background="{StaticResource Surface}"
+                        BorderBrush="{StaticResource Line}"
+                        BorderThickness="1"
+                        CornerRadius="9">
+                    <Grid>
+                        <TextBlock Text="Search name, tag, or type"
+                                   Margin="11,0,34,0"
+                                   VerticalAlignment="Center"
+                                   IsHitTestVisible="False"
+                                   Foreground="{StaticResource InkFaint}">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Visibility" Value="Visible" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding HasSearch}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+                        <TextBox x:Name="SearchBox"
+                                 Style="{StaticResource PlainTextBox}"
+                                 Text="{Binding SearchText, UpdateSourceTrigger=PropertyChanged}"
+                                 Padding="11,0,33,0"
+                                 KeyDown="OnSearchKeyDown"
+                                 ToolTip="Search by name, tag, or folder type. Prefixes narrow it: tag:work, type:photos, ext:png, is:folder  ·  Ctrl+F" />
+                        <Button
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center"
+                                Content="&#xE711;"
+                                Click="OnClearSearch"
+                                ToolTip="Clear search">
+                            <Button.Style>
+                                <Style TargetType="Button" BasedOn="{StaticResource IconButton}">
+                                    <Setter Property="Width" Value="26" />
+                                    <Setter Property="Height" Value="26" />
+                                    <Setter Property="Margin" Value="0,0,3,0" />
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding HasSearch}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                        </Button>
+                    </Grid>
+                </Border>
+                <ToggleButton Style="{StaticResource IconToggle}"
+                              Content="&#xE774;"
+                              Margin="0,0,7,0"
+                              IsChecked="{Binding SearchEverywhere}"
+                              ToolTip="Search everywhere. Applies to tag: and type: queries, which are answered from saved data rather than by scanning disks." />
+                <Button x:Name="FolderProfileButton"
+                        Click="OnFolderProfileButtonClick"
+                        ToolTip="Choose a saved view for this folder"
+                        AutomationProperties.Name="{Binding FolderProfileLabel}"
+                        Visibility="{Binding CanSetFolderProfile, Converter={StaticResource BoolToVisible}}">
+                    <Button.Style>
+                        <Style TargetType="Button" BasedOn="{StaticResource IconButton}">
+                            <Setter Property="Width" Value="96" />
+                        </Style>
+                    </Button.Style>
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE8EC;"
+                                   FontFamily="{StaticResource IconFont}"
+                                   FontSize="13"
+                                   Margin="0,0,7,0"
+                                   VerticalAlignment="Center"
+                                   Foreground="{StaticResource Accent}" />
+                        <TextBlock Text="{Binding FolderProfileLabel}"
+                                   FontFamily="{StaticResource UIFont}"
+                                   FontSize="11.5"
+                                   VerticalAlignment="Center" />
+                    </StackPanel>
+                    <Button.ContextMenu>
+                        <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
+                            <MenuItem Header="Automatic" Tag="Automatic" Click="OnFolderProfileSelected" />
+                            <MenuItem Header="General files" Tag="General" Click="OnFolderProfileSelected" />
+                            <Separator />
+                            <MenuItem Header="Desktop" Tag="Desktop" Click="OnFolderProfileSelected" />
+                            <MenuItem Header="Documents" Tag="Documents" Click="OnFolderProfileSelected" />
+                            <MenuItem Header="Downloads" Tag="Downloads" Click="OnFolderProfileSelected" />
+                            <MenuItem Header="Photos" Tag="Photos" Click="OnFolderProfileSelected" />
+                            <MenuItem Header="Music" Tag="Music" Click="OnFolderProfileSelected" />
+                            <MenuItem Header="Videos" Tag="Videos" Click="OnFolderProfileSelected" />
+                        </ContextMenu>
+                    </Button.ContextMenu>
+                </Button>
                 <StackPanel Orientation="Horizontal" Margin="0,0,7,0"
                             Visibility="{Binding IsGrid, Converter={StaticResource BoolToVisible}}">
                     <Button Style="{StaticResource IconButton}" Content="&#xE71F;"
@@ -217,6 +555,27 @@
                     <Button Style="{StaticResource IconButton}" Content="&#xE710;"
                             Click="OnZoomIn" ToolTip="Larger tiles  ·  Ctrl+mouse wheel" />
                 </StackPanel>
+                <Button x:Name="ColumnsButton"
+                        Style="{StaticResource IconButton}"
+                        Content="&#xE71D;"
+                        Click="OnColumnsButtonClick"
+                        ToolTip="Choose columns"
+                        Visibility="{Binding IsDetails, Converter={StaticResource BoolToVisible}}">
+                    <Button.ContextMenu>
+                        <ContextMenu ItemsSource="{Binding ColumnOptions}">
+                            <ContextMenu.ItemContainerStyle>
+                                <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
+                                    <Setter Property="Header" Value="{Binding Header}" />
+                                    <Setter Property="IsCheckable" Value="True" />
+                                    <Setter Property="IsChecked" Value="{Binding IsVisible, Mode=TwoWay}" />
+                                    <Setter Property="IsEnabled" Value="{Binding CanToggle}" />
+                                    <!-- Stay open so several can be ticked at once. -->
+                                    <Setter Property="StaysOpenOnClick" Value="True" />
+                                </Style>
+                            </ContextMenu.ItemContainerStyle>
+                        </ContextMenu>
+                    </Button.ContextMenu>
+                </Button>
                 <Button x:Name="LayoutButton"
                         Click="OnToggleLayout"
                         ToolTip="Switch between details and tiles  ·  Ctrl+Shift+V">
@@ -454,6 +813,7 @@
                         <RowDefinition Height="Auto" />
                         <RowDefinition Height="*" />
                         <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
                     </Grid.RowDefinitions>
 
                     <Border Grid.Row="0"
@@ -514,6 +874,13 @@
                                 <Setter Property="View" Value="{StaticResource DetailsView}" />
                                 <Setter Property="ItemContainerStyle" Value="{StaticResource FileRow}" />
                                 <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsMusicProfile}" Value="True">
+                                        <!-- Banding, not different columns: the column
+                                             set is now assembled in code from the
+                                             user's choice for this folder type. -->
+                                        <Setter Property="AlternationCount" Value="2" />
+                                        <Setter Property="ItemContainerStyle" Value="{StaticResource MusicRow}" />
+                                    </DataTrigger>
                                     <DataTrigger Binding="{Binding IsGrid}" Value="True">
                                         <Setter Property="View" Value="{x:Null}" />
                                         <Setter Property="ItemTemplate" Value="{StaticResource TileTemplate}" />
@@ -525,7 +892,9 @@
                         </ListView.Style>
 
                         <ListView.ContextMenu>
-                            <ContextMenu>
+                            <!-- Context menus live in a separate popup window in WPF.
+                                 Bind back to the list so its selection state stays live. -->
+                            <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
                                 <MenuItem Header="Open" Command="{Binding OpenCommand}" />
                                 <Separator />
                                 <MenuItem Header="Cut" Command="{Binding CutCommand}" InputGestureText="Ctrl+X" />
@@ -536,6 +905,42 @@
                                 <MenuItem Header="Delete" Command="{Binding DeleteCommand}" InputGestureText="Del" />
                                 <Separator />
                                 <MenuItem Header="Pin to sidebar" Click="OnPinDirectory" />
+                                <!-- Built on open in code-behind. A submenu that mixes
+                                     the live tag list with commands cannot be driven by
+                                     ItemsSource, which owns the whole item collection.
+                                     The placeholder gives it something to open. -->
+                                <MenuItem Header="Tags" SubmenuOpened="OnTagsSubmenuOpened">
+                                    <MenuItem Header="" />
+                                </MenuItem>
+                                <MenuItem Header="Set folder type"
+                                          IsEnabled="{Binding HasSelectedFolders}">
+                                    <MenuItem Header="Automatic"
+                                              Tag="Automatic"
+                                              Click="OnSelectedFolderProfile" />
+                                    <MenuItem Header="General files"
+                                              Tag="General"
+                                              Click="OnSelectedFolderProfile" />
+                                    <Separator />
+                                    <MenuItem Header="Desktop"
+                                              Tag="Desktop"
+                                              Click="OnSelectedFolderProfile" />
+                                    <MenuItem Header="Documents"
+                                              Tag="Documents"
+                                              Click="OnSelectedFolderProfile" />
+                                    <MenuItem Header="Downloads"
+                                              Tag="Downloads"
+                                              Click="OnSelectedFolderProfile" />
+                                    <MenuItem Header="Photos"
+                                              Tag="Photos"
+                                              Click="OnSelectedFolderProfile" />
+                                    <MenuItem Header="Music"
+                                              Tag="Music"
+                                              Click="OnSelectedFolderProfile" />
+                                    <MenuItem Header="Videos"
+                                              Tag="Videos"
+                                              Click="OnSelectedFolderProfile" />
+                                </MenuItem>
+                                <MenuItem Header="Reset columns" Click="OnResetColumns" />
                                 <MenuItem Header="Copy path" Command="{Binding CopyPathCommand}" InputGestureText="Ctrl+Shift+C" />
                                 <MenuItem Header="Properties" Command="{Binding PropertiesCommand}" InputGestureText="Alt+Enter" />
                             </ContextMenu>
@@ -548,21 +953,127 @@
                             Padding="16,8">
                         <Grid>
                             <TextBlock Text="{Binding StatusText}"
+                                       Margin="0,0,110,0"
                                        Foreground="{StaticResource InkMuted}"
                                        FontSize="11.5"
                                        VerticalAlignment="Center"
                                        TextTrimming="CharacterEllipsis" />
 
+                            <!-- Stays put while the walk runs, so there is a steady
+                                 signal that more results are still arriving even as
+                                 the count on the left keeps changing. -->
                             <Border HorizontalAlignment="Right"
-                                    Background="{StaticResource Base}"
+                                    VerticalAlignment="Center"
+                                    Background="{StaticResource AccentSoft}"
                                     CornerRadius="5"
-                                    Padding="8,3"
-                                    Visibility="{Binding HasTiming, Converter={StaticResource BoolToVisible}}">
-                                <TextBlock Text="{Binding TimingText}"
+                                    Padding="9,3"
+                                    Visibility="{Binding IsSearchingTree, Converter={StaticResource BoolToVisible}}">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="&#xE721;"
+                                               FontFamily="{StaticResource IconFont}"
+                                               FontSize="10"
+                                               VerticalAlignment="Center"
+                                               Foreground="{StaticResource Accent}" />
+                                    <TextBlock Text="Searching…"
+                                               Margin="6,0,0,0"
+                                               FontSize="10.5"
+                                               VerticalAlignment="Center"
+                                               Foreground="{StaticResource Accent}" />
+                                </StackPanel>
+                            </Border>
+                        </Grid>
+                    </Border>
+
+                    <!-- ===== Now playing ===== -->
+                    <Border Grid.Row="3"
+                            Background="{StaticResource Base}"
+                            BorderBrush="{StaticResource Line}"
+                            BorderThickness="0,1,0,0"
+                            CornerRadius="0,0,11,11"
+                            Padding="14,10"
+                            Visibility="{Binding Player.IsActive, Converter={StaticResource BoolToVisible}}">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="250" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Button Style="{StaticResource TransportButton}"
+                                        Content="&#xE892;"
+                                        Click="OnPlayerPrevious"
+                                        ToolTip="Previous" />
+                                <Button Style="{StaticResource PlayButton}"
+                                        Content="{Binding Player.PlayGlyph}"
+                                        Click="OnPlayerTogglePlay"
+                                        ToolTip="Play or pause  ·  Space" />
+                                <Button Style="{StaticResource TransportButton}"
+                                        Content="&#xE893;"
+                                        Click="OnPlayerNext"
+                                        ToolTip="Next" />
+                            </StackPanel>
+
+                            <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="14,0">
+                                <TextBlock Text="{Binding Player.TrackTitle}"
+                                           FontFamily="{StaticResource SerifFont}"
+                                           FontSize="13"
+                                           Foreground="{StaticResource Ink}"
+                                           TextTrimming="CharacterEllipsis" />
+                                <TextBlock Text="{Binding Player.TrackSubtitle}"
+                                           FontSize="11"
+                                           Margin="0,2,0,0"
+                                           Foreground="{StaticResource InkMuted}"
+                                           TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+
+                            <Grid Grid.Column="2" VerticalAlignment="Center">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+
+                                <TextBlock Grid.Column="0"
+                                           Text="{Binding Player.PositionText}"
                                            FontFamily="{StaticResource MonoFont}"
                                            FontSize="10.5"
-                                           Foreground="{StaticResource Accent}" />
-                            </Border>
+                                           VerticalAlignment="Center"
+                                           Foreground="{StaticResource InkFaint}" />
+
+                                <Slider Grid.Column="1"
+                                        Style="{StaticResource MediaSlider}"
+                                        Margin="10,0"
+                                        Maximum="{Binding Player.DurationSeconds}"
+                                        Value="{Binding Player.PositionSeconds, Mode=TwoWay}"
+                                        PreviewMouseLeftButtonDown="OnSeekStart"
+                                        PreviewMouseLeftButtonUp="OnSeekEnd" />
+
+                                <TextBlock Grid.Column="2"
+                                           Text="{Binding Player.DurationText}"
+                                           FontFamily="{StaticResource MonoFont}"
+                                           FontSize="10.5"
+                                           VerticalAlignment="Center"
+                                           Foreground="{StaticResource InkFaint}" />
+                            </Grid>
+
+                            <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0">
+                                <TextBlock Text="&#xE767;"
+                                           FontFamily="{StaticResource IconFont}"
+                                           FontSize="12"
+                                           VerticalAlignment="Center"
+                                           Foreground="{StaticResource InkFaint}" />
+                                <Slider Style="{StaticResource MediaSlider}"
+                                        Width="84"
+                                        Margin="8,0,4,0"
+                                        Maximum="1"
+                                        Value="{Binding Player.Volume, Mode=TwoWay}" />
+                                <Button Style="{StaticResource TransportButton}"
+                                        Content="&#xE711;"
+                                        Click="OnPlayerStop"
+                                        ToolTip="Close player" />
+                            </StackPanel>
                         </Grid>
                     </Border>
                 </Grid>
@@ -633,5 +1144,181 @@
                 </StackPanel>
             </Border>
         </Grid>
+
+        <!-- ===== Photo viewer ===== -->
+        <!-- Spans both rows so it covers the toolbar too: viewing a photo should
+             be the only thing on screen. -->
+        <Border Grid.Row="0"
+                Grid.RowSpan="2"
+                Background="#F2141312"
+                Focusable="True"
+                Visibility="{Binding Viewer.IsOpen, Converter={StaticResource BoolToVisible}}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- Header -->
+                <Grid Grid.Row="0" Margin="20,14,16,10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="{Binding Viewer.Title}"
+                                   FontFamily="{StaticResource SerifFont}"
+                                   FontSize="15"
+                                   Foreground="{StaticResource Ink}"
+                                   TextTrimming="CharacterEllipsis" />
+                        <TextBlock Text="{Binding Viewer.Subtitle}"
+                                   FontSize="11"
+                                   Margin="0,3,0,0"
+                                   Foreground="{StaticResource InkMuted}" />
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Style="{StaticResource ViewerButton}" Content="&#xE80C;"
+                                Click="OnViewerRotateLeft" ToolTip="Rotate left  ·  saves immediately" />
+                        <Button Style="{StaticResource ViewerButton}" Content="&#xE80D;"
+                                Click="OnViewerRotateRight" ToolTip="Rotate right  ·  saves immediately" />
+                        <Button Style="{StaticResource ViewerButton}" Content="&#xE7A8;"
+                                Click="OnViewerCrop" ToolTip="Crop" />
+                        <Border Width="1" Margin="8,10" Background="{StaticResource Line}" />
+                        <Button Style="{StaticResource ViewerButton}" Content="&#xE71F;"
+                                Click="OnViewerZoomOut" ToolTip="Zoom out  ·  &#8722;" />
+                        <TextBlock Text="{Binding Viewer.ZoomText}"
+                                   MinWidth="46"
+                                   VerticalAlignment="Center"
+                                   TextAlignment="Center"
+                                   FontFamily="{StaticResource MonoFont}"
+                                   FontSize="11"
+                                   Foreground="{StaticResource InkMuted}" />
+                        <Button Style="{StaticResource ViewerButton}" Content="&#xE8A3;"
+                                Click="OnViewerZoomIn" ToolTip="Zoom in  ·  +" />
+                        <Button Style="{StaticResource ViewerButton}" Content="&#xE9A6;"
+                                Click="OnViewerFit" ToolTip="Fit to window  ·  0" />
+                        <Border Width="1" Margin="8,10" Background="{StaticResource Line}" />
+                        <Button Style="{StaticResource ViewerButton}" Content="&#xE711;"
+                                Click="OnViewerClose" ToolTip="Close  ·  Esc" />
+                    </StackPanel>
+                </Grid>
+
+                <!-- Image surface -->
+                <Grid Grid.Row="1">
+                    <!-- Property elements must come before or after the content, never
+                         between children, so the menu is declared first. -->
+                    <Grid.ContextMenu>
+                        <ContextMenu>
+                            <MenuItem Header="Copy image" Click="OnViewerCopyImage" InputGestureText="Ctrl+C" />
+                            <MenuItem Header="Copy path" Click="OnViewerCopyPath" InputGestureText="Ctrl+Shift+C" />
+                            <Separator />
+                            <MenuItem Header="Rotate left" Click="OnViewerRotateLeft" />
+                            <MenuItem Header="Rotate right" Click="OnViewerRotateRight" />
+                            <MenuItem Header="Crop…" Click="OnViewerCrop" />
+                            <Separator />
+                            <MenuItem Header="Zoom in" Click="OnViewerZoomIn" />
+                            <MenuItem Header="Zoom out" Click="OnViewerZoomOut" />
+                            <MenuItem Header="Fit to window" Click="OnViewerFit" />
+                            <MenuItem Header="Actual size" Click="OnViewerActualSize" />
+                            <Separator />
+                            <MenuItem Header="Open with…" Click="OnViewerOpenWith" />
+                            <MenuItem Header="Show in folder" Click="OnViewerShowInFolder" />
+                            <MenuItem Header="Delete" Click="OnViewerDelete" InputGestureText="Del" />
+                        </ContextMenu>
+                    </Grid.ContextMenu>
+
+                    <ScrollViewer x:Name="ViewerScroll"
+                                  HorizontalScrollBarVisibility="Auto"
+                                  VerticalScrollBarVisibility="Auto"
+                                  Background="Transparent"
+                                  PreviewMouseWheel="OnViewerMouseWheel"
+                                  PreviewMouseDown="OnViewerSurfaceMouseDown"
+                                  PreviewMouseMove="OnViewerSurfaceMouseMove"
+                                  PreviewMouseUp="OnViewerSurfaceMouseUp"
+                                  LostMouseCapture="OnViewerSurfaceLostMouseCapture"
+                                  PreviewMouseLeftButtonDown="OnViewerSurfaceDown">
+                        <!-- The image sizes itself explicitly so the crop overlay can
+                             sit exactly on top of it and map 1:1 to source pixels. -->
+                        <Grid x:Name="ViewerStage"
+                              HorizontalAlignment="Center"
+                              VerticalAlignment="Center"
+                              Margin="20">
+                            <Image x:Name="ViewerImage"
+                                   Source="{Binding Viewer.Image}"
+                                   Stretch="Fill"
+                                   RenderOptions.BitmapScalingMode="HighQuality" />
+
+                            <Canvas x:Name="CropLayer"
+                                    Background="#33000000"
+                                    Cursor="Cross"
+                                    Visibility="{Binding Viewer.IsCropping, Converter={StaticResource BoolToVisible}}"
+                                    MouseLeftButtonDown="OnCropDown"
+                                    MouseMove="OnCropMove"
+                                    MouseLeftButtonUp="OnCropUp">
+                                <Border x:Name="CropRectangle"
+                                        BorderBrush="{StaticResource Accent}"
+                                        BorderThickness="2"
+                                        Background="#20D3A15F"
+                                        Visibility="Collapsed" />
+                            </Canvas>
+                        </Grid>
+                    </ScrollViewer>
+
+                    <Button Style="{StaticResource ViewerNavButton}"
+                            Content="&#xE76B;"
+                            HorizontalAlignment="Left"
+                            VerticalAlignment="Center"
+                            Margin="14,0,0,0"
+                            Click="OnViewerPrevious"
+                            IsEnabled="{Binding Viewer.CanGoPrevious}"
+                            ToolTip="Previous  ·  Left" />
+
+                    <Button Style="{StaticResource ViewerNavButton}"
+                            Content="&#xE76C;"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center"
+                            Margin="0,0,14,0"
+                            Click="OnViewerNext"
+                            IsEnabled="{Binding Viewer.CanGoNext}"
+                            ToolTip="Next  ·  Right" />
+
+                    <TextBlock Text="Loading…"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Bottom"
+                               Margin="0,0,0,14"
+                               FontSize="11"
+                               Foreground="{StaticResource InkFaint}"
+                               Visibility="{Binding Viewer.IsLoading, Converter={StaticResource BoolToVisible}}" />
+                </Grid>
+
+                <!-- Footer: crop confirmation, or the last status message -->
+                <Grid Grid.Row="2" Margin="20,8,20,16">
+                    <TextBlock Text="{Binding Viewer.Status}"
+                               VerticalAlignment="Center"
+                               FontSize="11.5"
+                               Foreground="{StaticResource InkMuted}"
+                               Visibility="{Binding Viewer.HasStatus, Converter={StaticResource BoolToVisible}}" />
+
+                    <StackPanel Orientation="Horizontal"
+                                HorizontalAlignment="Right"
+                                Visibility="{Binding Viewer.IsCropping, Converter={StaticResource BoolToVisible}}">
+                        <Button Style="{StaticResource ViewerTextButton}"
+                                Content="Cancel"
+                                Click="OnCropCancel" />
+                        <Button Style="{StaticResource ViewerTextButton}"
+                                Content="Save a copy"
+                                Click="OnCropSaveCopy"
+                                IsEnabled="{Binding Viewer.CanCommitCrop}" />
+                        <Button Style="{StaticResource ViewerTextButtonPrimary}"
+                                Content="Overwrite"
+                                Click="OnCropOverwrite"
+                                IsEnabled="{Binding Viewer.CanCommitCrop}" />
+                    </StackPanel>
+                </Grid>
+            </Grid>
+        </Border>
     </Grid>
 </Window>

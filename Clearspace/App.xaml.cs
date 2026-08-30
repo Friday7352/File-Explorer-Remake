@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Threading;
+using System.IO;
 
 namespace Clearspace;
 
@@ -46,6 +47,24 @@ public partial class App : Application
         var detail = exception is AggregateException aggregate
             ? aggregate.Flatten().InnerException ?? aggregate
             : exception;
+
+        // Keep a small local record as well as the dialog. Startup failures can
+        // occur before a window exists, in which case the dialog has nowhere
+        // useful to appear. The log is best-effort and never affects browsing.
+        try
+        {
+            var folder = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Clearspace", "Logs");
+            Directory.CreateDirectory(folder);
+            File.AppendAllText(
+                Path.Combine(folder, "errors.log"),
+                $"[{DateTime.Now:O}] {title}{Environment.NewLine}{detail}{Environment.NewLine}{Environment.NewLine}");
+        }
+        catch
+        {
+            // Reporting must never create a second error.
+        }
 
         // A layout exception can be raised by several queued WPF measure passes.
         // One dialog is useful; a stack of identical dialogs is not.

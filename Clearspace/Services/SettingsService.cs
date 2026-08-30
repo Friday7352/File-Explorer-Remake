@@ -12,6 +12,30 @@ public sealed class SettingsData
     /// <summary>Grid zoom is a per-location preference, separate from the chosen view.</summary>
     public Dictionary<string, double> FolderTileScales { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Folder path to its semantic view profile: General, Photos, or Music.</summary>
+    public Dictionary<string, string> FolderViewProfiles { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether hidden and system items are listed. Global rather than per folder,
+    /// matching how Explorer treats it: it is a statement about how you want to
+    /// work, not about one location.
+    /// </summary>
+    public bool ShowHiddenItems { get; set; }
+
+    /// <summary>
+    /// Chosen detail columns per folder. Explorer works this way too: which columns
+    /// are useful is a property of what is in this particular folder, not of the
+    /// whole machine.
+    /// </summary>
+    public Dictionary<string, List<string>> FolderColumns { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Chosen detail columns per view profile, not per folder. Columns describe the
+    /// kind of content, so setting them once for Music applies to every music
+    /// folder instead of needing to be redone in each one.
+    /// </summary>
+    public Dictionary<string, List<string>> ProfileColumns { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Sidebar entry name to a user-chosen path, overriding the known folder.</summary>
     public Dictionary<string, string> SidebarOverrides { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -85,6 +109,9 @@ public static class SettingsService
                     // Deserialised dictionaries lose the comparer, so rebuild them.
                     loaded.FolderLayouts = new Dictionary<string, string>(loaded.FolderLayouts, StringComparer.OrdinalIgnoreCase);
                     loaded.FolderTileScales = new Dictionary<string, double>(loaded.FolderTileScales ?? [], StringComparer.OrdinalIgnoreCase);
+                    loaded.FolderViewProfiles = new Dictionary<string, string>(loaded.FolderViewProfiles ?? [], StringComparer.OrdinalIgnoreCase);
+                    loaded.ProfileColumns = new Dictionary<string, List<string>>(loaded.ProfileColumns ?? [], StringComparer.OrdinalIgnoreCase);
+                    loaded.FolderColumns = new Dictionary<string, List<string>>(loaded.FolderColumns ?? [], StringComparer.OrdinalIgnoreCase);
                     loaded.SidebarOverrides = new Dictionary<string, string>(loaded.SidebarOverrides, StringComparer.OrdinalIgnoreCase);
                     loaded.PinnedDirectories = new Dictionary<string, string>(loaded.PinnedDirectories, StringComparer.OrdinalIgnoreCase);
                     loaded.PinnedCategories ??= [];
@@ -137,6 +164,89 @@ public static class SettingsService
     public static void SetFolderTileScale(string folder, double scale)
     {
         Current.FolderTileScales[folder] = scale;
+        Save();
+    }
+
+    public static string? GetFolderViewProfile(string folder)
+        => Current.FolderViewProfiles.TryGetValue(folder, out var profile) ? profile : null;
+
+    public static void SetFolderViewProfile(string folder, string? profile)
+    {
+        if (string.IsNullOrWhiteSpace(profile) ||
+            profile.Equals("Automatic", StringComparison.OrdinalIgnoreCase))
+            Current.FolderViewProfiles.Remove(folder);
+        else
+            Current.FolderViewProfiles[folder] = profile;
+
+        Save();
+    }
+
+    /// <summary>
+    /// Applies one folder type to several folders and writes settings only once.
+    /// This keeps a multi-select action responsive even for a large selection.
+    /// </summary>
+    public static void SetFolderViewProfiles(IEnumerable<string> folders, string? profile)
+    {
+        var applyAutomatic = string.IsNullOrWhiteSpace(profile) ||
+            profile.Equals("Automatic", StringComparison.OrdinalIgnoreCase);
+
+        foreach (var folder in folders
+                     .Where(folder => !string.IsNullOrWhiteSpace(folder))
+                     .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (applyAutomatic)
+                Current.FolderViewProfiles.Remove(folder);
+            else
+                Current.FolderViewProfiles[folder] = profile!;
+        }
+
+        Save();
+    }
+
+    public static bool GetShowHiddenItems() => Current.ShowHiddenItems;
+
+    public static void SetShowHiddenItems(bool value)
+    {
+        if (Current.ShowHiddenItems == value)
+            return;
+
+        Current.ShowHiddenItems = value;
+        Save();
+    }
+
+    /// <summary>
+    /// Every folder that has been given an explicit type, path to profile name.
+    /// Searching by folder type reads this rather than walking the disk.
+    /// </summary>
+    public static IReadOnlyDictionary<string, string> GetAllFolderViewProfiles() => Current.FolderViewProfiles;
+
+    /// <summary>Saved column ids for one folder, or null when it has never been set.</summary>
+    public static IReadOnlyList<string>? GetFolderColumns(string folder)
+        => Current.FolderColumns.TryGetValue(folder, out var columns) && columns.Count > 0
+            ? columns
+            : null;
+
+    public static void SetFolderColumns(string folder, IEnumerable<string> columnIds)
+    {
+        Current.FolderColumns[folder] = columnIds.ToList();
+        Save();
+    }
+
+    public static void ClearFolderColumns(string folder)
+    {
+        if (Current.FolderColumns.Remove(folder))
+            Save();
+    }
+
+    /// <summary>Saved column ids for a profile, or null when it has never been set.</summary>
+    public static IReadOnlyList<string>? GetProfileColumns(string profile)
+        => Current.ProfileColumns.TryGetValue(profile, out var columns) && columns.Count > 0
+            ? columns
+            : null;
+
+    public static void SetProfileColumns(string profile, IEnumerable<string> columnIds)
+    {
+        Current.ProfileColumns[profile] = columnIds.ToList();
         Save();
     }
 

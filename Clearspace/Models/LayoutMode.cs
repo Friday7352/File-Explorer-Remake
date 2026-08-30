@@ -11,6 +11,22 @@ public enum LayoutMode
     Grid
 }
 
+/// <summary>
+/// A saved semantic role for a directory. Unlike Details/Grid, this describes
+/// what the folder contains so Clearspace can choose a useful presentation.
+/// </summary>
+public enum DirectoryViewProfile
+{
+    Automatic,
+    General,
+    Desktop,
+    Documents,
+    Downloads,
+    Photos,
+    Music,
+    Videos
+}
+
 public static class MediaTypes
 {
     private static readonly HashSet<string> Image = new(StringComparer.OrdinalIgnoreCase)
@@ -25,6 +41,12 @@ public static class MediaTypes
         ".mp4", ".mkv", ".mov", ".avi", ".wmv", ".webm", ".m4v", ".mpg", ".mpeg", ".flv"
     };
 
+    private static readonly HashSet<string> Audio = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".mp3", ".m4a", ".aac", ".flac", ".wav", ".wma", ".ogg", ".opus",
+        ".aiff", ".aif", ".alac", ".ape", ".mid", ".midi"
+    };
+
     private static readonly HashSet<string> PreviewDocument = new(StringComparer.OrdinalIgnoreCase)
     {
         ".pdn", ".psd", ".psb", ".xcf", ".kra", ".ora", ".clip",
@@ -34,6 +56,8 @@ public static class MediaTypes
     public static bool IsImage(string extension) => Image.Contains(extension);
 
     public static bool IsVideo(string extension) => Video.Contains(extension);
+
+    public static bool IsAudio(string extension) => Audio.Contains(extension);
 
     public static bool IsThumbnailCandidate(string extension)
         => Image.Contains(extension) || Video.Contains(extension) || PreviewDocument.Contains(extension);

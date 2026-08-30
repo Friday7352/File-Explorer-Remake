@@ -58,14 +58,19 @@ public static class FileOperationService
         => string.Join('\0', paths) + "\0\0";
 
     /// <summary>Opens the shell's Properties dialog for a single item.</summary>
-    public static bool ShowProperties(string path, IntPtr owner)
+    public static bool ShowProperties(string path, IntPtr owner) => InvokeVerb("properties", path, owner);
+
+    /// <summary>Shows Windows' own "Open with" chooser.</summary>
+    public static bool OpenWith(string path, IntPtr owner) => InvokeVerb("openas", path, owner);
+
+    private static bool InvokeVerb(string verb, string path, IntPtr owner)
     {
         var info = new NativeMethods.SHELLEXECUTEINFO
         {
             cbSize = Marshal.SizeOf<NativeMethods.SHELLEXECUTEINFO>(),
             fMask = NativeMethods.SEE_MASK_INVOKEIDLIST,
             hwnd = owner,
-            lpVerb = "properties",
+            lpVerb = verb,
             lpFile = path,
             nShow = NativeMethods.SW_SHOW
         };

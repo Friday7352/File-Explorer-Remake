@@ -33,7 +33,14 @@ internal static class ScalableIconService
         foreach (var item in items)
         {
             if (item.IsFolder)
+            {
+                // Grid listings deliberately defer normal Shell icons. Typed
+                // folders still get the full Windows folder image plus a crisp
+                // vector badge immediately.
+                if (FolderIconService.HasType(item))
+                    item.GridPlaceholder = FolderIconService.AddTypeBadge(item, IconService.GetLargeIcon(item));
                 continue;
+            }
 
             item.GridPlaceholder = MediaTypes.IsImage(item.Extension)
                 ? Image

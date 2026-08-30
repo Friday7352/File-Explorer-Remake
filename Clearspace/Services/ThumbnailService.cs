@@ -23,10 +23,134 @@ public static class ThumbnailService
 {
     private sealed record ThumbnailRequest(FileSystemItem Item, int Size, int Generation, string CacheKey);
 
+    private sealed class CacheEntry
+    {
+        public required string Key { get; init; }
+        public required ImageSource Image { get; init; }
+        public required long Bytes { get; init; }
+
+        /// <summary>
+        /// The item currently displaying this bitmap. Weak, so the cache never
+        /// keeps a listing alive on its own.
+        /// </summary>
+        public required WeakReference<FileSystemItem> Owner { get; set; }
+    }
+
     private static readonly BlockingCollection<ThumbnailRequest> Queue = new(new ConcurrentQueue<ThumbnailRequest>());
-    private static readonly ConcurrentDictionary<string, ImageSource> Cache = new(StringComparer.OrdinalIgnoreCase);
+
+    // Decoded thumbnails are large and long-lived, so this is a hard-bounded LRU
+    // rather than a plain dictionary. An unbounded cache here is the difference
+    // between a flat 200 MB and multi-gigabyte growth over a browsing session.
+    private const long MaxCacheBytes = 192L * 1024 * 1024;
+    private static readonly object CacheGate = new();
+    private static readonly Dictionary<string, LinkedListNode<CacheEntry>> CacheIndex = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly LinkedList<CacheEntry> CacheOrder = new();
+    private static long _cacheBytes;
+
     private static readonly ConcurrentDictionary<string, ImageSource> ShellIconCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, byte> Pending = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Current thumbnail cache size in bytes. Useful when profiling.</summary>
+    internal static long CacheBytes => Interlocked.Read(ref _cacheBytes);
+
+    private static bool TryGetCached(string key, FileSystemItem item, out ImageSource image)
+    {
+        lock (CacheGate)
+        {
+            if (CacheIndex.TryGetValue(key, out var node))
+            {
+                CacheOrder.Remove(node);
+                CacheOrder.AddFirst(node);
+
+                // A refresh builds new item objects for the same paths, so the
+                // entry has to follow whichever one is on screen now.
+                node.Value.Owner = new WeakReference<FileSystemItem>(item);
+
+                image = node.Value.Image;
+                return true;
+            }
+        }
+
+        image = null!;
+        return false;
+    }
+
+    private static void StoreCached(string key, ImageSource image, FileSystemItem owner)
+    {
+        var bytes = EstimateBytes(image);
+        List<CacheEntry>? evicted = null;
+
+        lock (CacheGate)
+        {
+            if (CacheIndex.Remove(key, out var existing))
+            {
+                CacheOrder.Remove(existing);
+                _cacheBytes -= existing.Value.Bytes;
+            }
+
+            var node = CacheOrder.AddFirst(new CacheEntry
+            {
+                Key = key,
+                Image = image,
+                Bytes = bytes,
+                Owner = new WeakReference<FileSystemItem>(owner)
+            });
+
+            CacheIndex[key] = node;
+            _cacheBytes += bytes;
+
+            while (_cacheBytes > MaxCacheBytes && CacheOrder.Last is { } oldest)
+            {
+                CacheOrder.RemoveLast();
+                CacheIndex.Remove(oldest.Value.Key);
+                _cacheBytes -= oldest.Value.Bytes;
+
+                (evicted ??= []).Add(oldest.Value);
+            }
+        }
+
+        ReleaseEvicted(evicted);
+    }
+
+    /// <summary>
+    /// Detaches evicted bitmaps from the items still holding them.
+    ///
+    /// Without this the cache bound is meaningless: the dictionary shrinks while
+    /// every item scrolled past keeps its own strong reference, so a folder of a
+    /// few thousand photos still pins gigabytes. Off-screen tiles simply re-decode
+    /// when scrolled back to, which is what a bounded viewer has to do.
+    /// </summary>
+    private static void ReleaseEvicted(List<CacheEntry>? evicted)
+    {
+        if (evicted is null || evicted.Count == 0)
+            return;
+
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null)
+            return;
+
+        dispatcher.BeginInvoke(
+            System.Windows.Threading.DispatcherPriority.Background,
+            () =>
+            {
+                foreach (var entry in evicted)
+                {
+                    // Only clear it if the item is still showing this exact bitmap;
+                    // a newer thumbnail may have replaced it already.
+                    if (entry.Owner.TryGetTarget(out var item) &&
+                        ReferenceEquals(item.Thumbnail, entry.Image))
+                        item.Thumbnail = null;
+                }
+            });
+    }
+
+    /// <summary>Pixel cost of a decoded image. Everything here ends up as 32bpp.</summary>
+    private static long EstimateBytes(ImageSource image) => image switch
+    {
+        BitmapSource bitmap => (long)bitmap.PixelWidth * bitmap.PixelHeight * 4,
+        // Vector placeholders are cheap and shared; treat them as negligible.
+        _ => 4096
+    };
 
     private static int _generation;
     private static Thread? _worker;
@@ -35,6 +159,48 @@ public static class ThumbnailService
     /// <summary>Invalidates every queued request. Called when the folder changes.</summary>
     public static void CancelPending() => Interlocked.Increment(ref _generation);
 
+    /// <summary>
+    /// Forgets everything cached for one file, so the next request re-reads it from
+    /// disk. Called after an edit writes the file back.
+    ///
+    /// The cache key carries the file's modified time, and the caller normally holds
+    /// an item captured before the write, so its key no longer matches what a fresh
+    /// listing would produce. Matching on the path prefix clears both.
+    /// </summary>
+    public static void Invalidate(string path)
+    {
+        var prefix = path + "|";
+
+        lock (CacheGate)
+        {
+            var doomed = CacheIndex
+                .Where(pair => pair.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .Select(pair => pair.Value)
+                .ToList();
+
+            foreach (var node in doomed)
+            {
+                CacheOrder.Remove(node);
+                CacheIndex.Remove(node.Value.Key);
+                _cacheBytes -= node.Value.Bytes;
+            }
+        }
+
+        foreach (var key in Pending.Keys)
+        {
+            if (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                Pending.TryRemove(key, out _);
+        }
+
+        var iconPrefix = $"path:{path}|";
+
+        foreach (var key in ShellIconCache.Keys)
+        {
+            if (key.StartsWith(iconPrefix, StringComparison.OrdinalIgnoreCase))
+                ShellIconCache.TryRemove(key, out _);
+        }
+    }
+
     public static void Request(FileSystemItem item, int size)
     {
         if (item.Thumbnail is not null)
@@ -42,7 +208,7 @@ public static class ThumbnailService
 
         var key = CacheKey(item, size);
 
-        if (Cache.TryGetValue(key, out var cached))
+        if (TryGetCached(key, item, out var cached))
         {
             item.Thumbnail = cached;
             return;
@@ -95,7 +261,7 @@ public static class ThumbnailService
                 if (source is null)
                     continue;
 
-                Cache[request.CacheKey] = source;
+                StoreCached(request.CacheKey, source, request.Item);
 
                 if (request.Generation != Volatile.Read(ref _generation))
                     continue;
@@ -124,6 +290,17 @@ public static class ThumbnailService
         // kind of high-resolution preview ourselves so it is crisp at any tile size.
         if (item.IsFolder && !item.IsDriveRoot && Directory.Exists(path))
         {
+            // Preserve the real Windows folder artwork, then add a type badge.
+            // This is requested at the tile's source size, so neither the folder
+            // nor the mark becomes a stretched 16px list icon.
+            if (FolderIconService.HasType(item))
+            {
+                var shellFolder = GetShellIcon(item, size) ?? IconService.GetLargeIcon(item);
+                var typedFolder = FolderIconService.AddTypeBadge(item, shellFolder);
+                if (typedFolder is not null)
+                    return typedFolder;
+            }
+
             var preview = CreateFolderPreview(path, size);
             if (preview is not null)
                 return preview;
@@ -138,9 +315,17 @@ public static class ThumbnailService
                 var image = new BitmapImage();
                 image.BeginInit();
                 image.UriSource = new Uri(path, UriKind.Absolute);
-                image.DecodePixelWidth = Math.Max(48, size * 2);
+                // Decode at the requested size, not double it. ThumbnailSize is
+                // already chosen to cover the largest tile zoom, so the old size * 2
+                // cost four times the pixels for no visible gain: a 1024px decode is
+                // about 3 MB of pixels per photo.
+                image.DecodePixelWidth = Math.Max(48, size);
                 image.CacheOption = BitmapCacheOption.OnLoad;
-                image.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+                // IgnoreImageCache matters after an edit. WPF keeps a process-wide
+                // cache keyed on the URI, so without this a rotated file decodes
+                // back to the bitmap from before the rotation.
+                image.CreateOptions = BitmapCreateOptions.IgnoreColorProfile |
+                                      BitmapCreateOptions.IgnoreImageCache;
                 image.EndInit();
                 image.Freeze();
                 return image;
@@ -221,7 +406,17 @@ public static class ThumbnailService
             NativeMethods.SIIGBF_ICONONLY | NativeMethods.SIIGBF_BIGGERSIZEOK);
 
         if (icon is not null)
+        {
+            // Path-keyed entries (executables, shortcuts, folders) grow with every
+            // folder visited, unlike the extension-keyed ones which are naturally
+            // few. Drop the lot rather than let it climb without limit; rebuilding
+            // is a handful of cheap shell calls.
+            if (ShellIconCache.Count > 2048)
+                ShellIconCache.Clear();
+
             ShellIconCache.TryAdd(key, icon);
+        }
+
         return icon;
     }
 
@@ -309,23 +504,42 @@ public static class ThumbnailService
         {
             var width = (double)pixels;
             var height = (double)pixels;
-            var tab = new StreamGeometry();
-            using (var geometry = tab.Open())
+            // Keep preview folders in the *same closed-folder silhouette* as every
+            // other folder. The earlier composition looked like an open tray,
+            // which made a content preview feel like a completely different icon.
+            // The preview now sits neatly inside the front face instead.
+            var back = new StreamGeometry();
+            using (var geometry = back.Open())
             {
-                geometry.BeginFigure(new Point(width * .10, height * .29), true, true);
-                geometry.LineTo(new Point(width * .39, height * .29), true, false);
-                geometry.LineTo(new Point(width * .48, height * .16), true, false);
-                geometry.LineTo(new Point(width * .70, height * .16), true, false);
-                geometry.LineTo(new Point(width * .80, height * .29), true, false);
-                geometry.LineTo(new Point(width * .90, height * .29), true, false);
-                geometry.LineTo(new Point(width * .90, height * .78), true, false);
-                geometry.LineTo(new Point(width * .10, height * .78), true, false);
+                geometry.BeginFigure(new Point(width * .10, height * .28), true, true);
+                geometry.LineTo(new Point(width * .36, height * .28), true, false);
+                geometry.LineTo(new Point(width * .45, height * .15), true, false);
+                geometry.LineTo(new Point(width * .67, height * .15), true, false);
+                geometry.LineTo(new Point(width * .77, height * .28), true, false);
+                geometry.LineTo(new Point(width * .90, height * .28), true, false);
+                geometry.LineTo(new Point(width * .90, height * .75), true, false);
+                geometry.LineTo(new Point(width * .10, height * .75), true, false);
             }
-            tab.Freeze();
-            drawing.DrawGeometry(new SolidColorBrush(Color.FromRgb(238, 183, 57)), null, tab);
+            back.Freeze();
+            drawing.DrawGeometry(new SolidColorBrush(Color.FromRgb(246, 184, 43)), null, back);
 
-            var previewBounds = new Rect(width * .14, height * .31, width * .72, height * .40);
-            drawing.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(68, 65, 58)), null, previewBounds, width * .035, width * .035);
+            var face = new Rect(width * .10, height * .34, width * .80, height * .43);
+            drawing.DrawRoundedRectangle(
+                new SolidColorBrush(Color.FromRgb(255, 215, 111)),
+                new Pen(new SolidColorBrush(Color.FromRgb(221, 158, 23)), Math.Max(1, width * .012)),
+                face,
+                width * .045,
+                width * .045);
+
+            // The image area is deliberately inset, like Explorer's folder
+            // content previews, but it never changes the outer folder shape.
+            var previewBounds = new Rect(width * .17, height * .44, width * .66, height * .22);
+            drawing.DrawRoundedRectangle(
+                new SolidColorBrush(Color.FromRgb(68, 65, 58)),
+                null,
+                previewBounds,
+                width * .018,
+                width * .018);
 
             if (previews.Count == 1)
             {
@@ -339,14 +553,14 @@ public static class ThumbnailService
                 DrawCroppedImage(drawing, previews[1], new Rect(previewBounds.X + tileWidth + gap, previewBounds.Y, tileWidth, previewBounds.Height), width * .02);
             }
 
-            // The front lip gives the preview a recognisable Windows-folder shape
-            // while the images remain visible in the open part of the folder.
+            // A light glaze makes the preview feel embedded in the same smooth
+            // folder face, rather than appearing as an open-folder cavity.
             drawing.DrawRoundedRectangle(
-                new SolidColorBrush(Color.FromRgb(255, 214, 108)),
-                null,
-                new Rect(width * .10, height * .56, width * .80, height * .27),
-                width * .045,
-                width * .045);
+                new SolidColorBrush(Color.FromArgb(28, 255, 255, 255)),
+                new Pen(new SolidColorBrush(Color.FromArgb(76, 255, 255, 255)), Math.Max(1, width * .006)),
+                previewBounds,
+                width * .018,
+                width * .018);
         }
 
         var bitmap = new RenderTargetBitmap(pixels, pixels, 96, 96, PixelFormats.Pbgra32);
@@ -362,9 +576,12 @@ public static class ThumbnailService
             var image = new BitmapImage();
             image.BeginInit();
             image.UriSource = new Uri(path, UriKind.Absolute);
-            image.DecodePixelWidth = Math.Max(96, size);
+            // Folder previews draw these at roughly a third of the tile, so a
+            // quarter-size decode is plenty and keeps three of them cheap.
+            image.DecodePixelWidth = Math.Max(64, size / 3);
             image.CacheOption = BitmapCacheOption.OnLoad;
-            image.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+            image.CreateOptions = BitmapCreateOptions.IgnoreColorProfile |
+                                  BitmapCreateOptions.IgnoreImageCache;
             image.EndInit();
             image.Freeze();
             return image;

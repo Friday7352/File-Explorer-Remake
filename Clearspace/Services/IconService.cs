@@ -38,7 +38,10 @@ public static class IconService
             return IconCache.GetOrAdd($"drive:{item.FullPath}", _ => LoadIcon(item.FullPath, isFolder: true, useAttributes: false, large: true));
 
         if (item.IsFolder)
-            return IconCache.GetOrAdd(FolderKey, _ => LoadIcon(item.FullPath, isFolder: true, useAttributes: true));
+        {
+            var folder = IconCache.GetOrAdd(FolderKey, _ => LoadIcon(item.FullPath, isFolder: true, useAttributes: true));
+            return FolderIconService.AddTypeBadge(item, folder);
+        }
 
         var extension = item.Extension;
 
