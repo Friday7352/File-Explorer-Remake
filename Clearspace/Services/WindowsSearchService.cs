@@ -88,12 +88,13 @@ public static class WindowsSearchService
         SearchQuery query,
         IReadOnlyList<string> roots,
         int maxResults,
+        bool matchContents,
         CancellationToken token)
     {
         if (!IsAvailable || query.Terms.Count == 0 || roots.Count == 0)
             return [];
 
-        var sql = BuildSql(query, roots, maxResults);
+        var sql = BuildSql(query, roots, maxResults, matchContents);
 
         if (sql is null)
             return [];
@@ -141,7 +142,11 @@ public static class WindowsSearchService
         return hits;
     }
 
-    private static string? BuildSql(SearchQuery query, IReadOnlyList<string> roots, int maxResults)
+    private static string? BuildSql(
+        SearchQuery query,
+        IReadOnlyList<string> roots,
+        int maxResults,
+        bool matchContents)
     {
         var scopes = roots
             .Where(root => !root.StartsWith(@"\\", StringComparison.Ordinal))
@@ -165,10 +170,14 @@ public static class WindowsSearchService
             if (contains.Length == 0)
                 continue;
 
-            // FREETEXT over Contents covers document bodies; the LIKE keeps plain
-            // filename matches working for files with no content filter.
+            // The name half always applies. The contents half is what the caller
+            // is choosing between: with it, this finds a document that mentions
+            // the word; without it, only one that is named for it.
             sql.Append(" AND (System.FileName LIKE '%").Append(like).Append("%'");
-            sql.Append(" OR CONTAINS(System.Search.Contents, '\"").Append(contains).Append("*\"')");
+
+            if (matchContents)
+                sql.Append(" OR CONTAINS(System.Search.Contents, '\"").Append(contains).Append("*\"')");
+
             sql.Append(')');
         }
 

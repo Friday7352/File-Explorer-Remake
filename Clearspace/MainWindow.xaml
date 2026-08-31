@@ -542,13 +542,13 @@
                               Content="&#xE774;"
                               Margin="0,0,7,0"
                               IsChecked="{Binding SearchEverywhere}"
-                              ToolTip="Search everywhere. Applies to tag: and type: queries, which are answered from saved data rather than by scanning disks." />
+                              ToolTip="Search everywhere. Looks across every drive rather than just this folder and the folders inside it." />
                 <ToggleButton Style="{StaticResource IconToggle}"
-                              Content="&#xE721;"
+                              Content="&#xE8A5;"
                               Margin="0,0,1,0"
-                              IsChecked="{Binding UseWindowsIndex}"
+                              IsChecked="{Binding SearchFileContents}"
                               IsEnabled="{Binding IsWindowsIndexAvailable}"
-                              ToolTip="Use the Windows Search index for instant results, including text inside documents. The full scan still runs, so turning this off costs speed but never completeness." />
+                              ToolTip="Search inside files. On, this also finds documents that mention the word; off, it matches file and folder names only, which is faster. Contents are read from the Windows Search index, so it only covers locations Windows has indexed." />
                 <Button Style="{StaticResource IconButton}"
                         Content="&#xE713;"
                         Margin="0,0,7,0"
@@ -1099,6 +1099,30 @@
                                                    VerticalAlignment="Center"
                                                    Foreground="{StaticResource InkMuted}" />
                                         <TextBlock Text="{Binding CloudRootName}"
+                                                   Margin="6,0,0,0"
+                                                   FontSize="10.5"
+                                                   VerticalAlignment="Center"
+                                                   Foreground="{StaticResource InkMuted}" />
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- The index is a background job that deliberately
+                                     announces itself nowhere else, so this badge is
+                                     the whole of its user interface: what it is doing
+                                     now, how much it holds, and - on hover - which
+                                     build is running and where the file lives. -->
+                                <Border Background="#14FFFFFF"
+                                        CornerRadius="5"
+                                        Padding="9,3"
+                                        Margin="0,0,8,0"
+                                        ToolTip="{Binding IndexTooltip}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE8F1;"
+                                                   FontFamily="{StaticResource IconFont}"
+                                                   FontSize="10"
+                                                   VerticalAlignment="Center"
+                                                   Foreground="{StaticResource InkMuted}" />
+                                        <TextBlock Text="{Binding IndexStatusText}"
                                                    Margin="6,0,0,0"
                                                    FontSize="10.5"
                                                    VerticalAlignment="Center"

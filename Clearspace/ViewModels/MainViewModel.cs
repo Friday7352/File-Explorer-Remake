@@ -54,6 +54,10 @@ public sealed class MainViewModel : ObservableObject
         // Definitions can change from the tag dialog; keep the menu in step.
         TagService.Changed += (_, _) => RefreshTagOptions();
 
+        // The index runs on its own thread and is otherwise invisible, so this is
+        // the one thread of communication back to the window.
+        FileIndexService.Changed += OnFileIndexChanged;
+
         Sidebar = new ObservableCollection<SidebarEntry>();
         RebuildSidebar();
         LoadColumns();
@@ -79,6 +83,7 @@ public sealed class MainViewModel : ObservableObject
         // here, through the property, makes startup behave like a fresh toggle.
         SearchEverywhere = SettingsService.GetSearchEverywhere();
         UseWindowsIndex = SettingsService.GetUseWindowsIndex();
+        SearchFileContents = SettingsService.GetSearchFileContents();
         ShowHiddenItems = SettingsService.GetShowHiddenItems();
     }
 
@@ -634,6 +639,106 @@ public sealed class MainViewModel : ObservableObject
         _ => "Automatic"
     };
 
+    // ---------- File index ----------
+
+    private DateTime _lastIndexReport = DateTime.MinValue;
+
+    /// <summary>
+    /// Raised on the index's own thread, so this hops to the dispatcher before
+    /// touching anything bound.
+    ///
+    /// A build reports every sixty-four directories, which is far more often than
+    /// a status line needs to change, so progress is throttled. The terminal
+    /// updates - the ones that leave the badge on its final count - are never
+    /// throttled, because a stale count is exactly what this exists to avoid.
+    /// </summary>
+    private void OnFileIndexChanged(object? sender, EventArgs e)
+    {
+        var now = DateTime.UtcNow;
+
+        if (FileIndexService.IsBuilding && now - _lastIndexReport < TimeSpan.FromMilliseconds(400))
+            return;
+
+        _lastIndexReport = now;
+
+        var dispatcher = Application.Current?.Dispatcher;
+
+        if (dispatcher is null)
+            return;
+
+        dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+        {
+            OnPropertyChanged(nameof(IndexStatusText));
+            OnPropertyChanged(nameof(IndexTooltip));
+        });
+    }
+
+    /// <summary>What the index badge in the status bar says.</summary>
+    public string IndexStatusText
+    {
+        get
+        {
+            var status = FileIndexService.Status;
+            return status.Length > 0 ? status : "Index starting…";
+        }
+    }
+
+    /// <summary>
+    /// Hovering the badge answers the two questions a background feature cannot
+    /// answer on its own: which build is running, and where its index actually
+    /// lives so it can be looked at.
+    /// </summary>
+    public string IndexTooltip
+    {
+        get
+        {
+            var lines = new List<string>
+            {
+                $"Clearspace {BuildVersion}  ·  built {BuildStamp}",
+                string.Empty,
+                // Stated plainly rather than left to be discovered in Task Manager.
+                // Every filename in RAM is what makes search instant, and on a large
+                // machine that is the biggest allocation the app makes.
+                $"{FileIndexService.Count:N0} items  ·  about {FileSystemItem.FormatSize(FileIndexService.EstimatedBytes)} in memory"
+            };
+
+            foreach (var skipped in FileIndexService.SkippedRoots)
+                lines.Add($"{skipped} too large to index — searched by crawling");
+
+            lines.Add(string.Empty);
+            lines.Add(FileIndexStore.FilePath);
+
+            return string.Join(Environment.NewLine, lines);
+        }
+    }
+
+    /// <summary>
+    /// The running executable's own timestamp. Version numbers change when someone
+    /// remembers to change them; this changes on every single build, which is what
+    /// makes it a trustworthy answer to "am I actually running my new code".
+    /// </summary>
+    public static string BuildStamp
+    {
+        get
+        {
+            try
+            {
+                var path = Environment.ProcessPath;
+
+                return string.IsNullOrEmpty(path) || !File.Exists(path)
+                    ? "unknown"
+                    : File.GetLastWriteTime(path).ToString("yyyy-MM-dd HH:mm:ss");
+            }
+            catch (Exception)
+            {
+                return "unknown";
+            }
+        }
+    }
+
+    public static string BuildVersion =>
+        System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version?.ToString() ?? "1.0.0";
+
     private string _statusText = "Ready";
     public string StatusText
     {
@@ -711,6 +816,32 @@ public sealed class MainViewModel : ObservableObject
     {
         if (!WindowsSearchService.OpenIndexingOptions())
             StatusText = "Could not open Windows indexing options.";
+    }
+
+    private bool _searchFileContents;
+
+    /// <summary>
+    /// Whether a search also looks inside documents.
+    ///
+    /// Clearspace's own index knows every filename on the machine and nothing at
+    /// all about what is written in them; only the Windows index has read the
+    /// files themselves. So this is the switch between "named for it" and
+    /// "mentions it", and turning it off makes searching purely a name question -
+    /// which is both narrower and, since it needs no query at all, faster.
+    /// </summary>
+    public bool SearchFileContents
+    {
+        get => _searchFileContents;
+        set
+        {
+            if (!SetProperty(ref _searchFileContents, value))
+                return;
+
+            SettingsService.SetSearchFileContents(value);
+
+            if (HasSearch)
+                ApplySearchFilter(updateStatus: true);
+        }
     }
 
     private bool _showHiddenItems;
@@ -876,6 +1007,12 @@ public sealed class MainViewModel : ObservableObject
         // disconnected network mapping, which is not something to pay for
         // before the first frame.
         _ = LoadDrivesAsync();
+
+        // Started immediately, not on a delay. It loads the saved index first and
+        // only then waits before walking anything, so a machine that has indexed
+        // before is searchable as soon as the window is up rather than ten seconds
+        // later. All of it happens on the index's own background thread.
+        FileIndexService.Start();
     }
 
     private async Task LoadDrivesAsync()
@@ -1035,7 +1172,73 @@ public sealed class MainViewModel : ObservableObject
 
         _pendingQuery = query;
         _searchDebounce.Stop();
+
+        // The debounce exists to stop every keystroke from launching a walk of a
+        // whole drive. When the index answers, no walk happens at all, so almost
+        // all of that delay is pure added latency between typing a letter and
+        // seeing the result. What is left is just enough to coalesce a fast
+        // typist's burst into one query.
+        _searchDebounce.Interval = FileIndexService.IsLive
+            ? TimeSpan.FromMilliseconds(35)
+            : TimeSpan.FromMilliseconds(350);
+
         _searchDebounce.Start();
+    }
+
+    /// <summary>
+    /// The work that follows an index answer: icons, type names, and pruning any
+    /// result that no longer exists on disk.
+    ///
+    /// Deliberately not awaited. The results are already on screen; this only
+    /// refines them, and making the answer wait for it would be trading the thing
+    /// the index was built for.
+    /// </summary>
+    private void FinishIndexResultsAsync(
+        IReadOnlyList<FileSystemItem> indexed,
+        List<FileSystemItem> found,
+        CancellationToken token)
+    {
+        // No cancellation token on the task itself: a cancelled Task.Run raises an
+        // unobserved exception, and App treats those as worth a dialog.
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                IconService.Populate(indexed);
+                IconService.PopulateTypeNames(indexed);
+
+                // The index is a snapshot of the last walk, so anything deleted
+                // while Clearspace was closed is still in it. Checking existence
+                // is bounded by how many results came back rather than by the size
+                // of the index, which is what makes it affordable at all - and it
+                // is the only thing that catches a stale entry before the next
+                // rebuild.
+                var missing = FileIndexService.PruneMissing(indexed);
+
+                if (missing.Count == 0 || token.IsCancellationRequested)
+                    return;
+
+                var dispatcher = Application.Current?.Dispatcher;
+
+                dispatcher?.BeginInvoke(DispatcherPriority.Background, () =>
+                {
+                    if (token.IsCancellationRequested)
+                        return;
+
+                    var gone = new HashSet<string>(
+                        missing.Select(item => item.FullPath),
+                        StringComparer.OrdinalIgnoreCase);
+
+                    found.RemoveAll(item => gone.Contains(item.FullPath));
+                    Items = found.ToArray();
+                });
+            }
+            catch (Exception)
+            {
+                // Cosmetic and corrective work only. A failure here must never
+                // surface as an error over a search that already succeeded.
+            }
+        });
     }
 
     /// <summary>Stops any running subfolder walk and the timer that would start one.</summary>
@@ -1145,7 +1348,25 @@ public sealed class MainViewModel : ObservableObject
         var capped = false;
         var pendingPublish = false;
 
-        IsSearchingTree = true;
+        // Terms are read once: the property builds a fresh array on every access,
+        // and ranking asks for them on every publish.
+        var rankTerms = query.Terms;
+
+        // When the results were actually on screen, as opposed to when the whole
+        // pipeline finished. Those stopped being the same number once the index
+        // started publishing directly and the Windows content index kept running
+        // behind it.
+        long? shownMilliseconds = null;
+
+        // When the index covers every root and is live, there is nothing for a
+        // disk walk to add: it holds every name on those volumes and the watcher
+        // has been carrying changes since it was built. Skipping the walk is the
+        // whole point of having an index - answering instantly and then grinding
+        // across the drives anyway would be the worst of both.
+        var indexAnswersEverything = roots.Count > 0 && roots.All(FileIndexService.Covers);
+
+        // Only claim to be searching if something is actually going to search.
+        IsSearchingTree = !indexAnswersEverything;
 
         // Results reach the list on a timer rather than on every batch.
         //
@@ -1162,19 +1383,29 @@ public sealed class MainViewModel : ObservableObject
             Interval = TimeSpan.FromMilliseconds(250)
         };
 
-        void Publish()
+        void Publish(bool rank)
         {
             if (!pendingPublish || token.IsCancellationRequested)
                 return;
 
             pendingPublish = false;
+
+            // Not on every tick. Scoring thousands of results means a pass over
+            // each one's path, and a streaming crawl publishes four times a
+            // second - on the UI thread. Ranking happens where it is worth paying
+            // for: the index answer, which arrives complete, and the final publish
+            // once a crawl has finished streaming.
+            if (rank)
+                SearchRanker.Rank(found, rankTerms, CurrentPath);
+
             Items = found.ToArray();
+            shownMilliseconds ??= timer.ElapsedMilliseconds;
             StatusText = SearchEverywhere
                 ? $"Searching all drives… {found.Count:N0} found"
                 : $"Searching subfolders… {found.Count:N0} found";
         }
 
-        publishTimer.Tick += (_, _) => Publish();
+        publishTimer.Tick += (_, _) => Publish(rank: false);
         publishTimer.Start();
 
         // Marshals to the UI thread, so it now does bookkeeping only.
@@ -1208,9 +1439,68 @@ public sealed class MainViewModel : ObservableObject
             ((IProgress<IReadOnlyList<FileSystemItem>>)progress).Report(batch);
         });
 
-        // The index answers in milliseconds and already knows what is inside
-        // documents, so its hits land before the crawl has read one directory.
-        if (UseWindowsIndex && WindowsSearchService.IsAvailable)
+        // Clearspace's own file index answers from memory - no shell calls, no
+        // stat calls, no disk at all - so its hits are on screen before anything
+        // else has opened a directory.
+        //
+        // With the watcher running this is not merely a head start: when the index
+        // covers every root, the crawl below never runs at all and this is the
+        // whole answer. The Windows index still follows, because it knows what is
+        // inside documents and a name index never will.
+        try
+        {
+            var indexed = await Task.Run(
+                () => FileIndexService.Search(query, roots, showHidden, MaxSearchResults, token),
+                token);
+
+            if (indexed.Count > 0 && !token.IsCancellationRequested)
+            {
+                foreach (var item in indexed)
+                {
+                    if (!seen.Add(item.FullPath))
+                        continue;
+
+                    // On the UI thread, so the tag store stays single-threaded.
+                    item.RefreshTags();
+                    found.Add(item);
+                }
+
+                // Straight onto the screen rather than through the publish timer.
+                // That timer exists to keep a streaming crawl from rebuilding the
+                // list dozens of times a second; an index answer arrives once and
+                // complete, and making it wait for a tick would put back a quarter
+                // second of the delay this is all trying to remove.
+                SearchRanker.Rank(found, rankTerms, CurrentPath);
+                Items = found.ToArray();
+                pendingPublish = false;
+                shownMilliseconds ??= timer.ElapsedMilliseconds;
+
+                // Icons, type names, and checking that these files still exist all
+                // happen behind the results, not in front of them. None of it
+                // changes which rows match - only how they look and whether a
+                // stale one survives - and each item raises its own change
+                // notification, so the list fills itself in a moment later.
+                FinishIndexResultsAsync(indexed, found, token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            publishTimer.Stop();
+            return;
+        }
+        catch (Exception)
+        {
+            // An accelerator that fails costs speed, never results.
+        }
+
+        // The Windows index is the only thing here that has read the files
+        // themselves, so it is worth querying when contents are wanted. When they
+        // are not, it is only worth querying for volumes Clearspace's own index
+        // does not already cover - otherwise it would be answering a name question
+        // that has already been answered, from disk, more slowly.
+        var needsWindowsIndex = SearchFileContents || !indexAnswersEverything;
+
+        if (needsWindowsIndex && WindowsSearchService.IsAvailable)
         {
             try
             {
@@ -1220,7 +1510,8 @@ public sealed class MainViewModel : ObservableObject
                 // belongs on the worker alongside the query itself.
                 var fromIndex = await Task.Run(() =>
                 {
-                    var hits = WindowsSearchService.Search(query, roots, MaxSearchResults, token);
+                    var hits = WindowsSearchService.Search(
+                        query, roots, MaxSearchResults, SearchFileContents, token);
                     var materialised = new List<FileSystemItem>(hits.Count);
 
                     foreach (var hit in hits)
@@ -1262,9 +1553,12 @@ public sealed class MainViewModel : ObservableObject
 
         try
         {
-            capped = await Task.Run(
-                () => FileSearchService.Run(roots, showHidden, query.Matches, populatedProgress, MaxSearchResults, token),
-                token);
+            if (!indexAnswersEverything)
+            {
+                capped = await Task.Run(
+                    () => FileSearchService.Run(roots, showHidden, query.Matches, populatedProgress, MaxSearchResults, token),
+                    token);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -1296,9 +1590,9 @@ public sealed class MainViewModel : ObservableObject
         var dispatcher = Application.Current?.Dispatcher;
 
         if (dispatcher is not null)
-            await dispatcher.InvokeAsync(Publish, DispatcherPriority.Background);
+            await dispatcher.InvokeAsync(() => Publish(rank: true), DispatcherPriority.Background);
         else
-            Publish();
+            Publish(rank: true);
 
         timer.Stop();
 
@@ -1306,13 +1600,25 @@ public sealed class MainViewModel : ObservableObject
             ? "across all drives"
             : "in this folder and subfolders";
 
+        // Worth saying out loud. The difference between an answer from memory and
+        // one from a disk walk is the difference between milliseconds and minutes,
+        // and it is the only way to tell at a glance that the index did its job.
+        var source = indexAnswersEverything ? "  ·  from index" : string.Empty;
+
+        // Time to results, not time to the end of the pipeline. The Windows
+        // content index is queried after the index answer is already on screen, so
+        // including it reported a number the user never waited for.
+        var elapsed = indexAnswersEverything && shownMilliseconds.HasValue
+            ? shownMilliseconds.Value
+            : timer.ElapsedMilliseconds;
+
         StatusText = found.Count switch
         {
             0 => $"No matches {scope}",
-            1 => $"1 match {scope}  ·  {timer.ElapsedMilliseconds} ms",
+            1 => $"1 match {scope}  ·  {elapsed} ms{source}",
             _ => capped
                 ? $"First {found.Count:N0} matches {scope}  ·  narrow the search to see fewer"
-                : $"{found.Count:N0} matches {scope}  ·  {timer.ElapsedMilliseconds} ms"
+                : $"{found.Count:N0} matches {scope}  ·  {elapsed} ms{source}"
         };
     }
 

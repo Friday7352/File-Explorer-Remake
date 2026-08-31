@@ -64,6 +64,16 @@ public partial class App : Application
         };
     }
 
+    protected override void OnExit(ExitEventArgs e)
+    {
+        // Writing the index on the way out is what makes the next launch instant
+        // instead of a rebuild. Best-effort: a failure here costs one background
+        // rebuild and nothing else.
+        Services.FileIndexService.Stop();
+
+        base.OnExit(e);
+    }
+
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
         Report(e.Exception, "Clearspace hit an error");

@@ -434,6 +434,48 @@ internal static class NativeMethods
         out int lpBytesReturned,
         IntPtr lpOverlapped);
 
+    // ---------- Background work ----------
+
+    /// <summary>
+    /// Puts the calling thread into Windows' background processing mode. This is
+    /// not the same as ThreadPriority.Lowest: that only lowers CPU priority, and a
+    /// job that walks directories is bound by the disk, not the processor.
+    /// Background mode lowers the thread's *I/O* priority too, so foreground work
+    /// keeps the disk and an index build stays genuinely unnoticeable.
+    ///
+    /// It applies to the calling thread only, which is why it takes the pseudo
+    /// handle from GetCurrentThread rather than a handle passed in from outside.
+    /// </summary>
+    internal const int THREAD_MODE_BACKGROUND_BEGIN = 0x00010000;
+    internal const int THREAD_MODE_BACKGROUND_END = 0x00020000;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetThreadPriority(IntPtr hThread, int nPriority);
+
+    [DllImport("kernel32.dll")]
+    internal static extern IntPtr GetCurrentThread();
+
+    // ---------- Volume identity ----------
+
+    /// <summary>
+    /// Reads a volume's serial number, which is what tells a saved index that the
+    /// drive it describes is still the same drive. A reformat or a recycled letter
+    /// changes it, and the index for that volume is dropped rather than serving
+    /// results for files that no longer exist.
+    /// </summary>
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool GetVolumeInformationW(
+        string lpRootPathName,
+        IntPtr lpVolumeNameBuffer,
+        int nVolumeNameSize,
+        out uint lpVolumeSerialNumber,
+        out uint lpMaximumComponentLength,
+        out uint lpFileSystemFlags,
+        IntPtr lpFileSystemNameBuffer,
+        int nFileSystemNameSize);
+
     // ---------- Window chrome ----------
 
     internal const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;

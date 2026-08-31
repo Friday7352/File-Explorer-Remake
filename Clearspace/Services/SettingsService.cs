@@ -37,6 +37,17 @@ public sealed class SettingsData
     public bool SearchEverywhere { get; set; }
 
     /// <summary>
+    /// Whether searching also looks inside documents, or matches names only.
+    ///
+    /// Separate from the index settings because it is a different question. Names
+    /// are answered from Clearspace's own index in memory; contents can only come
+    /// from the Windows index, which has run filters over the files themselves.
+    /// Wanting one is not wanting the other - "find the file called invoice" and
+    /// "find the file that mentions invoice" are different searches.
+    /// </summary>
+    public bool SearchFileContents { get; set; } = true;
+
+    /// <summary>
     /// Chosen detail columns per folder. Explorer works this way too: which columns
     /// are useful is a property of what is in this particular folder, not of the
     /// whole machine.
@@ -249,6 +260,17 @@ public static class SettingsService
             return;
 
         Current.ShowHiddenItems = value;
+        Save();
+    }
+
+    public static bool GetSearchFileContents() => Current.SearchFileContents;
+
+    public static void SetSearchFileContents(bool value)
+    {
+        if (Current.SearchFileContents == value)
+            return;
+
+        Current.SearchFileContents = value;
         Save();
     }
 

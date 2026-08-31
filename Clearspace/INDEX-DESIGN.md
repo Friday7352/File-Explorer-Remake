@@ -3,7 +3,38 @@
 A design for instant search across every drive, built quietly in the background,
 with no elevation at any point.
 
-Status: proposed. Nothing here is built yet.
+Status: built.
+
+`Services/FileIndex.cs` (store), `FileIndexBuilder.cs` (background walk),
+`FileIndexStore.cs` (persistence), `FileIndexService.cs` (ownership and queries),
+`IndexOverlay.cs` (changes since the walk) and `FileIndexWatcher.cs` (watching).
+
+When the index is live and covers every search root, the disk crawl does not run
+at all - the answer comes entirely from memory.
+
+Measured on an 11.3 million file machine: 3,877 matches across all drives in
+317 ms before the latency work below, from an index that walks in the background
+at low I/O priority and reloads from disk in under a second.
+
+### One gap, and why it is the shape it is
+
+A watcher only runs while Clearspace does. Nothing observes the filesystem while
+the app is closed, and without the USN journal - which needs administrator rights
+this design has ruled out - there is no record to catch up from afterwards.
+
+A directory's modified time was going to be the trick: walk the tree, skip any
+folder that has not changed since the index was built. It does not work. Adding a
+file deep in a tree updates only its immediate parent's timestamp, not its
+ancestors', so pruning on mtime would skip precisely the subtrees that changed.
+Finding out what happened costs a full walk either way.
+
+So the gap is closed from the other end. Results are verified rather than the
+index: after a search has already been shown, the rows it returned are checked
+for existence and any that have gone are pruned and recorded. That is bounded by
+how many results came back, not by the size of the index, which is what makes it
+affordable - and it is the same answer where it is visible, since a stale entry
+nobody ever sees in a result does no harm. Volumes are also rebuilt if they are
+more than an hour old, which bounds how long that can persist.
 
 ## What actually makes search instant
 
@@ -198,19 +229,12 @@ folder indexing has exactly this limitation and handles it the same way.
 
 ### Catching up after a restart
 
-`ReadDirectoryChangesW` cannot tell you what happened while the app was closed.
-A full rebuild on every launch would work and would be wasteful.
+The pruned walk this section originally proposed does not work, and the reason is
+worth keeping: a directory's modified time changes when an entry is added to or
+removed from *it*, but not when something changes further down. Ancestors are
+untouched. Pruning on mtime would therefore skip the very subtrees that changed.
 
-Instead, a pruned walk: a directory's last-write time changes when an entry is
-added to or removed from it, so the catch-up pass only descends into folders
-whose mtime is newer than `LastBuilt`. On a drive where little changed, that
-visits a handful of directories instead of all of them.
-
-It does not catch a file whose *contents* changed without its directory being
-touched, so sizes and dates for existing files can be briefly stale after a
-restart. They correct themselves as soon as the watcher sees them, and a stale
-size in a search result is a much smaller problem than a two-minute rebuild on
-every launch.
+What replaced it is verification at the result, described under Status above.
 
 ## Searching
 
