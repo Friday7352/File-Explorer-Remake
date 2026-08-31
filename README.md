@@ -110,3 +110,5 @@ _archive/        Superseded prototypes kept for reference
 ```
 
 For architecture and implementation notes, see [Clearspace/ARCHITECTURE.md](Clearspace/ARCHITECTURE.md).
+
+Please note that this is still in early development. There will be bugs and missing features. I will try to add these and patch bugs when I can. Thank you for trying this out!
