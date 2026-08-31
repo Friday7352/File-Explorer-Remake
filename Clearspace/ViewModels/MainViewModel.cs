@@ -16,10 +16,12 @@ public sealed class MainViewModel : ObservableObject
     public const string NetworkPath = "clearspace://network";
     public const string YourFilesPath = "clearspace://your-files";
     public const string PinnedPath = "clearspace://pinned";
+    public const string CloudPath = "clearspace://cloud";
     public const string CategoryPathPrefix = "clearspace://category/";
 
     private CancellationTokenSource? _loadCancellation;
     private List<SidebarEntry> _driveEntries = [];
+    private readonly bool _isDemoMode;
 
     // Subfolder search state. The crawl is debounced so typing does not launch a
     // new walk of an entire drive on every keystroke.
@@ -31,8 +33,9 @@ public sealed class MainViewModel : ObservableObject
     /// <summary>Upper bound on subfolder hits, so a broad query cannot exhaust memory.</summary>
     private const int MaxSearchResults = 10_000;
 
-    public MainViewModel()
+    public MainViewModel(bool isDemoMode = false)
     {
+        _isDemoMode = isDemoMode;
         Navigation = new NavigationService();
         Context = new ExplorerContext { Navigation = Navigation };
         Commands = new CommandManager(Context);
@@ -44,6 +47,7 @@ public sealed class MainViewModel : ObservableObject
             Commands.RefreshState();
             UpdateStatus();
             OnPropertyChanged(nameof(HasSelectedFolders));
+            OnPropertyChanged(nameof(HasCloudSelection));
             RefreshTagOptions();
         };
 
@@ -92,6 +96,37 @@ public sealed class MainViewModel : ObservableObject
 
     public IReadOnlyList<string> VisibleColumns => _visibleColumns;
 
+    public double? GetColumnWidth(string columnId)
+        => string.IsNullOrWhiteSpace(CurrentPath)
+            ? null
+            : SettingsService.GetFolderColumnWidth(CurrentPath, columnId);
+
+    public void SaveColumnWidth(string columnId, double width)
+    {
+        if (!string.IsNullOrWhiteSpace(CurrentPath))
+            SettingsService.SetFolderColumnWidth(CurrentPath, columnId, width);
+    }
+
+    /// <summary>
+    /// Commits the order produced by a header drag without rebuilding the details
+    /// view. That keeps the interaction smooth while making the order survive a
+    /// refresh, navigation away/back, and a restart.
+    /// </summary>
+    public void SaveColumnOrder(IEnumerable<string> columnIds)
+    {
+        var visible = new HashSet<string>(_visibleColumns, StringComparer.OrdinalIgnoreCase);
+        var ordered = ColumnCatalog.Sanitise(columnIds)
+            .Where(visible.Contains)
+            .ToList();
+
+        if (ordered.Count != _visibleColumns.Count)
+            return;
+
+        _visibleColumns = ordered;
+        if (!string.IsNullOrWhiteSpace(CurrentPath))
+            SettingsService.SetFolderColumns(CurrentPath, _visibleColumns);
+    }
+
     private void LoadColumns()
     {
         var profile = FolderProfile == DirectoryViewProfile.Automatic
@@ -104,7 +139,7 @@ public sealed class MainViewModel : ObservableObject
             ? null
             : SettingsService.GetFolderColumns(CurrentPath);
 
-        _visibleColumns = ColumnCatalog.Sanitise(saved ?? ColumnCatalog.DefaultsFor(profile));
+        _visibleColumns = ColumnCatalog.Sanitise(saved ?? ColumnCatalog.DefaultsFor(profile, IsCloudFolder));
 
         ColumnOptions.Clear();
 
@@ -225,15 +260,24 @@ public sealed class MainViewModel : ObservableObject
     /// When on, a query naming tags or folder types is answered from the saved
     /// indexes instead of the current listing, so results span every location
     /// Clearspace knows about.
+    ///
+    /// Persisted, and read from settings on construction. This is a standing
+    /// preference about how you search rather than something scoped to one
+    /// session: someone who works across pinned locations wants it on every time,
+    /// and having to switch it back on at each launch is the kind of small tax
+    /// that makes a setting feel like it does not work.
     /// </summary>
-    private bool _searchEverywhere;
+    private bool _searchEverywhere = SettingsService.GetSearchEverywhere();
     public bool SearchEverywhere
     {
         get => _searchEverywhere;
         set
         {
-            if (SetProperty(ref _searchEverywhere, value))
-                ApplySearchFilter(updateStatus: true);
+            if (!SetProperty(ref _searchEverywhere, value))
+                return;
+
+            SettingsService.SetSearchEverywhere(value);
+            ApplySearchFilter(updateStatus: true);
         }
     }
 
@@ -618,6 +662,35 @@ public sealed class MainViewModel : ObservableObject
         private set => SetProperty(ref _isLoading, value);
     }
 
+    private bool _useWindowsIndex = SettingsService.GetUseWindowsIndex();
+    /// <summary>
+    /// Consult the Windows Search index for instant results, including matches on
+    /// text inside documents. The crawl runs regardless, so this trades nothing
+    /// away: it only makes the first results arrive sooner.
+    /// </summary>
+    public bool UseWindowsIndex
+    {
+        get => _useWindowsIndex;
+        set
+        {
+            if (!SetProperty(ref _useWindowsIndex, value))
+                return;
+
+            SettingsService.SetUseWindowsIndex(value);
+
+            if (HasSearch)
+                ApplySearchFilter(updateStatus: true);
+        }
+    }
+
+    public bool IsWindowsIndexAvailable => WindowsSearchService.IsAvailable;
+
+    public void OpenIndexingOptions()
+    {
+        if (!WindowsSearchService.OpenIndexingOptions())
+            StatusText = "Could not open Windows indexing options.";
+    }
+
     private bool _showHiddenItems = SettingsService.GetShowHiddenItems();
     public bool ShowHiddenItems
     {
@@ -648,9 +721,133 @@ public sealed class MainViewModel : ObservableObject
 
     public IReadOnlyList<Breadcrumb> Breadcrumbs => BuildBreadcrumbs(CurrentPath);
 
-    public void Start()
+    // ---------- Access and elevation ----------
+
+    private bool _isCloudFolder;
+
+    /// <summary>True when this folder sits inside a cloud provider's sync root.</summary>
+    public bool IsCloudFolder
     {
-        Navigation.Navigate(KnownFolders.Profile);
+        get => _isCloudFolder;
+        private set => SetProperty(ref _isCloudFolder, value);
+    }
+
+    private string _cloudRootName = string.Empty;
+
+    /// <summary>
+    /// The provider backing this folder, e.g. "OneDrive - Personal". Named rather
+    /// than implied: with Known Folder Move, Documents and Desktop are inside
+    /// OneDrive while still looking exactly like the local folders they replaced,
+    /// and a machine can have a personal account and a work tenant at once.
+    /// </summary>
+    public string CloudRootName
+    {
+        get => _cloudRootName;
+        private set => SetProperty(ref _cloudRootName, value);
+    }
+
+    private string? _accessDeniedPath;
+
+    /// <summary>The folder Windows refused, or null when the last load succeeded.</summary>
+    public string? AccessDeniedPath
+    {
+        get => _accessDeniedPath;
+        private set
+        {
+            if (SetProperty(ref _accessDeniedPath, value))
+            {
+                OnPropertyChanged(nameof(IsAccessDenied));
+                OnPropertyChanged(nameof(CanRetryElevated));
+            }
+        }
+    }
+
+    public bool IsAccessDenied => _accessDeniedPath is not null;
+
+    /// <summary>
+    /// Offering "open as administrator" from a window that is already elevated
+    /// would only buy a second identical refusal, so the button hides itself.
+    /// </summary>
+    public bool CanRetryElevated => IsAccessDenied && !ElevationService.IsElevated;
+
+    /// <summary>Title bar text. An elevated instance says so, the way Explorer does not.</summary>
+    public string WindowTitle => ElevationService.IsElevated
+        ? "Clearspace \u00b7 Administrator"
+        : "Clearspace";
+
+    /// <summary>Launches a second, elevated Clearspace on the folder that was refused.</summary>
+    public void OpenCurrentElevated()
+    {
+        var target = AccessDeniedPath ?? CurrentPath;
+
+        if (string.IsNullOrWhiteSpace(target))
+            return;
+
+        if (!ElevationService.TryRelaunchAt(target, out var message) && message is not null)
+            StatusText = message;
+    }
+
+    // ---------- Cloud files ----------
+
+    public bool HasCloudSelection => Context.SelectedItems.Any(item => item.IsCloudItem);
+
+    /// <summary>
+    /// Pins the selection to this device, or releases it back to the provider.
+    ///
+    /// The walk runs off the UI thread because pinning a folder rewrites an
+    /// attribute on every descendant. Only the attributes change here; the sync
+    /// engine notices and moves the bytes afterwards, so the listing is refreshed
+    /// once at the end rather than polled.
+    /// </summary>
+    public async Task SetCloudPinStateAsync(bool pinned)
+    {
+        var targets = Context.SelectedItems
+            .Where(item => item.IsCloudItem)
+            .Select(item => item.FullPath)
+            .ToArray();
+
+        if (targets.Length == 0)
+            return;
+
+        StatusText = pinned ? "Keeping on this device\u2026" : "Freeing up space\u2026";
+
+        try
+        {
+            await Task.Run(() =>
+            {
+                foreach (var target in targets)
+                    CloudStorageService.SetPinned(target, pinned);
+            });
+        }
+        catch (Exception exception)
+        {
+            StatusText = exception.Message;
+            return;
+        }
+
+        await RefreshAsync();
+
+        var noun = targets.Length == 1 ? "item" : "items";
+        StatusText = pinned
+            ? $"{targets.Length:N0} {noun} will be kept on this device"
+            : $"{targets.Length:N0} {noun} released to the cloud";
+    }
+
+    public void Start(string? initialPath = null)
+    {
+        if (_isDemoMode)
+        {
+            Navigation.Navigate(DemoWorkspace.HomePath);
+            return;
+        }
+
+        // An elevated relaunch hands over the folder that was refused, so the new
+        // window opens where the previous one stopped rather than at the profile.
+        var start = !string.IsNullOrWhiteSpace(initialPath) && Directory.Exists(initialPath)
+            ? initialPath
+            : KnownFolders.Profile;
+
+        Navigation.Navigate(start);
 
         // Drives are discovered after the window is up. Querying IsReady or
         // VolumeLabel can block for seconds on an empty optical drive or a
@@ -665,7 +862,16 @@ public sealed class MainViewModel : ObservableObject
 
         try
         {
-            drives = await Task.Run(EnumerateDrives);
+            // Cloud discovery rides along with the drive scan for the same reason
+            // the drive scan is here at all: it reads the registry and calls
+            // Directory.Exists on roots that may live on a disconnected mapping,
+            // and neither belongs in front of the first frame. RebuildSidebar
+            // below then fills in the sync marks.
+            drives = await Task.Run(() =>
+            {
+                _ = CloudStorageService.Roots;
+                return EnumerateDrives();
+            });
         }
         catch (Exception)
         {
@@ -731,7 +937,7 @@ public sealed class MainViewModel : ObservableObject
         // add results: previously it swapped the listing for index hits alone, so a
         // file matching by name here disappeared the moment the query also named a
         // tag, which looked like the toggle losing things.
-        if (SearchEverywhere && query.HasIndexFilter)
+        if (!_isDemoMode && SearchEverywhere && query.HasIndexFilter)
         {
             var known = new HashSet<string>(seed.Select(item => item.FullPath), StringComparer.OrdinalIgnoreCase);
 
@@ -747,6 +953,11 @@ public sealed class MainViewModel : ObservableObject
 
         if (updateStatus)
             UpdateSearchStatus();
+
+        // The demo is intentionally self-contained. Its search remains instant
+        // within the visible sample data and never starts a crawl of real disks.
+        if (_isDemoMode)
+            return;
 
         _pendingQuery = query;
         _searchDebounce.Stop();
@@ -873,6 +1084,47 @@ public sealed class MainViewModel : ObservableObject
                 : $"Searching subfolders… {found.Count:N0} found";
         });
 
+        // The index answers in milliseconds and already knows what is inside
+        // documents, so its hits land before the crawl has read one directory.
+        if (UseWindowsIndex && WindowsSearchService.IsAvailable)
+        {
+            try
+            {
+                var hits = await Task.Run(
+                    () => WindowsSearchService.Search(query, roots, MaxSearchResults, token),
+                    token);
+
+                var fromIndex = new List<FileSystemItem>(hits.Count);
+
+                foreach (var hit in hits)
+                {
+                    var item = FileSystemItem.FromLocation(hit.Path);
+
+                    if (item is null)
+                        continue;
+
+                    // Structural filters only. These already matched by name or by
+                    // file contents, and a document containing a word will not have
+                    // that word in its filename.
+                    if (!query.MatchesStructural(item))
+                        continue;
+
+                    fromIndex.Add(item);
+                }
+
+                if (fromIndex.Count > 0)
+                    ((IProgress<IReadOnlyList<FileSystemItem>>)progress).Report(fromIndex);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+            catch (Exception)
+            {
+                // A stopped indexer must never break searching; the crawl covers it.
+            }
+        }
+
         try
         {
             capped = await Task.Run(
@@ -972,6 +1224,12 @@ public sealed class MainViewModel : ObservableObject
         if (string.IsNullOrWhiteSpace(path))
             return;
 
+        if (_isDemoMode)
+        {
+            await LoadDemoAsync(path);
+            return;
+        }
+
         var navigationTimer = Stopwatch.StartNew();
         var keepCurrentItems = force &&
                                path.Equals(CurrentPath, StringComparison.OrdinalIgnoreCase) &&
@@ -1027,6 +1285,14 @@ public sealed class MainViewModel : ObservableObject
         RestoreFolderProfile(path);
         RestoreTileScale(path);
 
+        // Sync membership belongs to the location, not to each row, so it is
+        // resolved once per navigation. LoadColumns below reads it to decide
+        // whether the Status column is worth showing here.
+        var cloudRoot = CloudStorageService.RootFor(path);
+        IsCloudFolder = cloudRoot is not null;
+        CloudRootName = cloudRoot?.Name ?? string.Empty;
+        AccessDeniedPath = null;
+
         // Columns are per folder, so they have to be re-read on every navigation,
         // not only when the folder type happens to change.
         LoadColumns();
@@ -1062,6 +1328,7 @@ public sealed class MainViewModel : ObservableObject
 
             if (path.Equals(YourFilesPath, StringComparison.OrdinalIgnoreCase) ||
                 path.Equals(PinnedPath, StringComparison.OrdinalIgnoreCase) ||
+                path.Equals(CloudPath, StringComparison.OrdinalIgnoreCase) ||
                 path.StartsWith(CategoryPathPrefix, StringComparison.OrdinalIgnoreCase))
             {
                 await LoadHubAsync(path, stopwatch, token);
@@ -1158,7 +1425,15 @@ public sealed class MainViewModel : ObservableObject
         catch (UnauthorizedAccessException)
         {
             SetDirectoryItems([]);
-            StatusText = "You don't have permission to view this folder";
+            AccessDeniedPath = path;
+
+            // Worth distinguishing. Some paths are refused to administrators too:
+            // System Volume Information wants SYSTEM, and the compatibility
+            // junctions such as C:\Users\All Users carry a deny rule that no token
+            // gets past. Offering elevation there would only repeat the refusal.
+            StatusText = ElevationService.IsElevated
+                ? "Windows refused this folder even with administrator rights"
+                : "You don't have permission to view this folder";
         }
         catch (DirectoryNotFoundException)
         {
@@ -1178,6 +1453,52 @@ public sealed class MainViewModel : ObservableObject
                 Commands.RefreshState();
             }
         }
+    }
+
+    /// <summary>
+    /// Loads the README sample workspace synchronously from memory. No shell,
+    /// directory, thumbnail, cloud, or drive APIs are used on this path.
+    /// </summary>
+    private Task LoadDemoAsync(string path)
+    {
+        // A toolbar Home command normally supplies the real user profile. In the
+        // sample build it remains inside the synthetic workspace instead.
+        if (!DemoWorkspace.IsDemoPath(path) &&
+            !path.Equals(MyPcPath, StringComparison.OrdinalIgnoreCase) &&
+            !path.Equals(NetworkPath, StringComparison.OrdinalIgnoreCase) &&
+            !path.Equals(YourFilesPath, StringComparison.OrdinalIgnoreCase) &&
+            !path.Equals(PinnedPath, StringComparison.OrdinalIgnoreCase))
+        {
+            path = DemoWorkspace.HomePath;
+        }
+
+        CancelTreeSearch();
+        Viewer.Close();
+
+        if (HasSearch)
+            SearchText = string.Empty;
+
+        var view = DemoWorkspace.ViewFor(path);
+        CurrentPath = path;
+        AddressText = DemoWorkspace.AddressFor(path);
+        IsCloudFolder = false;
+        CloudRootName = string.Empty;
+        AccessDeniedPath = null;
+        FolderProfile = view.Profile;
+        Layout = view.Layout;
+        SetDirectoryItems(view.Items);
+        // Demo pages are deliberately a clean canvas for README screenshots.
+        // The regular app still keeps its useful hub summaries.
+        ClearHubInfo();
+        StatusText = view.Items.Count switch
+        {
+            0 => "This sample folder is empty",
+            _ => $"{view.Items.Count(item => item.IsFolder):N0} folders, {view.Items.Count(item => !item.IsFolder):N0} files · demo workspace"
+        };
+        TimingText = string.Empty;
+        IsLoading = false;
+        Commands.RefreshState();
+        return Task.CompletedTask;
     }
 
     private async Task LoadVirtualDrivesAsync(string path, Stopwatch stopwatch, CancellationToken token)
@@ -1216,10 +1537,11 @@ public sealed class MainViewModel : ObservableObject
     private async Task LoadHubAsync(string path, Stopwatch stopwatch, CancellationToken token)
     {
         var isPinnedHub = path.Equals(PinnedPath, StringComparison.OrdinalIgnoreCase);
+        var isCloudHub = path.Equals(CloudPath, StringComparison.OrdinalIgnoreCase);
         var categoryId = path.StartsWith(CategoryPathPrefix, StringComparison.OrdinalIgnoreCase)
             ? path[CategoryPathPrefix.Length..]
             : null;
-        var items = await Task.Run(() => BuildHubItems(isPinnedHub, categoryId), token);
+        var items = await Task.Run(() => BuildHubItems(isPinnedHub, isCloudHub, categoryId), token);
 
         if (token.IsCancellationRequested)
             return;
@@ -1234,6 +1556,19 @@ public sealed class MainViewModel : ObservableObject
             ? isPinnedHub ? "No pinned directories yet" : "No locations available"
             : $"{items.Count:N0} location{(items.Count == 1 ? string.Empty : "s")}";
         UpdateSearchStatus();
+
+        if (isCloudHub)
+        {
+            SetHubInfo(
+                "Cloud",
+                items.Count == 0
+                    ? "No sync folders"
+                    : $"{items.Count:N0} sync folder{(items.Count == 1 ? string.Empty : "s")}",
+                "Folders a provider keeps in step with the cloud. Inside them the Status column shows what is actually stored on this device.");
+            TimingText = $"{stopwatch.ElapsedMilliseconds} ms";
+            return;
+        }
+
         var categoryName = categoryId is null ? null : SettingsService.GetSidebarSections()
             .FirstOrDefault(section => section.Id.Equals($"category:{categoryId}", StringComparison.OrdinalIgnoreCase))?.Name;
         SetHubInfo(
@@ -1355,6 +1690,9 @@ public sealed class MainViewModel : ObservableObject
         if (string.IsNullOrWhiteSpace(path))
             return [];
 
+        if (DemoWorkspace.IsDemoPath(path))
+            return DemoWorkspace.BreadcrumbsFor(path);
+
         if (path.Equals(MyPcPath, StringComparison.OrdinalIgnoreCase))
             return [new Breadcrumb("This PC", MyPcPath)];
 
@@ -1366,6 +1704,9 @@ public sealed class MainViewModel : ObservableObject
 
         if (path.Equals(PinnedPath, StringComparison.OrdinalIgnoreCase))
             return [new Breadcrumb("Pinned directories", PinnedPath)];
+
+        if (path.Equals(CloudPath, StringComparison.OrdinalIgnoreCase))
+            return [new Breadcrumb("Cloud", CloudPath)];
 
         if (path.StartsWith(CategoryPathPrefix, StringComparison.OrdinalIgnoreCase))
         {
@@ -1412,7 +1753,7 @@ public sealed class MainViewModel : ObservableObject
                     yield return Section(section, PinnedPath, isFavorites: true);
                     if (!section.IsCollapsed)
                         foreach (var pin in SettingsService.GetPins(categoryId: null))
-                            yield return new SidebarEntry(pin.Value, pin.Key, IsPinned: true, IsChild: true);
+                            yield return WithCloud(new SidebarEntry(pin.Value, pin.Key, IsPinned: true, IsChild: true));
                     break;
 
                 case "this-pc":
@@ -1427,12 +1768,23 @@ public sealed class MainViewModel : ObservableObject
                         foreach (var drive in drives.Where(drive => drive.IsNetworkDrive)) yield return Child(drive);
                     break;
 
+                case "cloud":
+                    // No provider signed in means no heading at all, rather than an
+                    // empty section the user has to look at and cannot remove.
+                    if (CloudStorageService.Roots.Count == 0)
+                        break;
+
+                    yield return Section(section, CloudPath);
+                    if (!section.IsCollapsed)
+                        foreach (var root in BuildCloudEntries()) yield return Child(root);
+                    break;
+
                 case var _ when section.IsCategory:
                     var categoryId = section.Id["category:".Length..];
                     yield return Section(section, CategoryPathPrefix + categoryId, isCategory: true, categoryId: categoryId);
                     if (!section.IsCollapsed)
                         foreach (var pin in SettingsService.GetPins(categoryId))
-                            yield return new SidebarEntry(pin.Value, pin.Key, IsPinned: true, CategoryId: categoryId, IsChild: true);
+                            yield return WithCloud(new SidebarEntry(pin.Value, pin.Key, IsPinned: true, CategoryId: categoryId, IsChild: true));
                     break;
             }
         }
@@ -1442,11 +1794,35 @@ public sealed class MainViewModel : ObservableObject
         => new(section.Name, path, IsHeader: true, IsPinnedRoot: isFavorites, IsCategory: isCategory,
             CategoryId: categoryId, IsCollapsed: section.IsCollapsed, IsSection: true, SectionId: section.Id);
 
-    private static SidebarEntry Child(SidebarEntry entry) => entry with { IsChild = true };
+    private static SidebarEntry Child(SidebarEntry entry) => WithCloud(entry with { IsChild = true });
+
+    /// <summary>
+    /// Tags a row with the provider that syncs it, if any. Applied to every leaf
+    /// row rather than only to known folders, because a pinned project folder can
+    /// sit inside OneDrive just as easily as Documents can.
+    ///
+    /// Skipped entirely until discovery has run, so the sidebar build in the
+    /// constructor never forces registry reads onto the UI thread. The rebuild
+    /// that follows drive discovery is what puts the marks on.
+    /// </summary>
+    private static SidebarEntry WithCloud(SidebarEntry entry)
+        => entry.IsHeader || entry.CloudProvider is not null || !CloudStorageService.IsDiscovered
+            ? entry
+            : entry with { CloudProvider = CloudStorageService.RootFor(entry.Path)?.Name };
 
     /// <summary>A saved override wins over the known folder location.</summary>
     private static SidebarEntry Entry(string name, string defaultPath)
-        => new(name, SettingsService.GetSidebarOverride(name) ?? defaultPath, IsKnownFolder: true);
+    {
+        var path = SettingsService.GetSidebarOverride(name) ?? defaultPath;
+
+        return new SidebarEntry(
+            name,
+            path,
+            IsKnownFolder: true,
+            CloudProvider: CloudStorageService.IsDiscovered
+                ? CloudStorageService.RootFor(path)?.Name
+                : null);
+    }
 
     /// <summary>Points a sidebar entry somewhere else and remembers it.</summary>
     public void SetSidebarLocation(string name, string path)
@@ -1538,6 +1914,13 @@ public sealed class MainViewModel : ObservableObject
     {
         Sidebar.Clear();
 
+        if (_isDemoMode)
+        {
+            foreach (var entry in DemoWorkspace.Sidebar)
+                Sidebar.Add(entry);
+            return;
+        }
+
         foreach (var entry in BuildSidebarEntries(_driveEntries))
             Sidebar.Add(entry);
     }
@@ -1594,10 +1977,12 @@ public sealed class MainViewModel : ObservableObject
         return entries;
     }
 
-    private static List<FileSystemItem> BuildHubItems(bool pinnedOnly, string? categoryId)
+    private static List<FileSystemItem> BuildHubItems(bool pinnedOnly, bool cloudOnly, string? categoryId)
     {
         IEnumerable<SidebarEntry> locations = categoryId is not null
             ? SettingsService.GetPins(categoryId).Select(pin => new SidebarEntry(pin.Value, pin.Key, IsPinned: true, CategoryId: categoryId))
+            : cloudOnly
+            ? BuildCloudEntries()
             : pinnedOnly
             ? SettingsService.GetPinnedDirectories()
                 .OrderBy(pin => pin.Value, StringComparer.OrdinalIgnoreCase)
@@ -1610,6 +1995,13 @@ public sealed class MainViewModel : ObservableObject
             .Cast<FileSystemItem>()
             .ToList();
     }
+
+    /// <summary>
+    /// One row per cloud root. These are real folders on disk, so they navigate
+    /// and enumerate like any other location; only the label is provider-supplied.
+    /// </summary>
+    private static IEnumerable<SidebarEntry> BuildCloudEntries()
+        => CloudStorageService.Roots.Select(root => new SidebarEntry(root.Name, root.Path, IsKnownFolder: true));
 
     private static IEnumerable<SidebarEntry> BuildUserFileEntries()
     {
@@ -1665,10 +2057,22 @@ public sealed record SidebarEntry(
     bool IsCollapsed = false,
     bool IsSection = false,
     string? SectionId = null,
-    bool IsChild = false)
+    bool IsChild = false,
+    string? CloudProvider = null)
 {
     public string DisplayName => Name;
     public string CollapseGlyph => IsCollapsed ? "\uE76C" : "\uE70D";
     public bool HasHub => IsSection && !string.IsNullOrWhiteSpace(Path);
     public bool IsNestedPin => IsPinned;
+
+    /// <summary>
+    /// True when a provider syncs this location. Known Folder Move is the case
+    /// that matters: it relocates Desktop and Documents inside OneDrive without
+    /// changing anything the user sees, so the row has to say so itself.
+    /// </summary>
+    public bool IsCloudBacked => !string.IsNullOrWhiteSpace(CloudProvider);
+
+    public string CloudHint => IsCloudBacked
+        ? $"Backed up by {CloudProvider}"
+        : string.Empty;
 }

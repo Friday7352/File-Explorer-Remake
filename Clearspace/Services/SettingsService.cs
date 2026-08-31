@@ -16,6 +16,13 @@ public sealed class SettingsData
     public Dictionary<string, string> FolderViewProfiles { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// Whether the Windows Search index is consulted for instant results. The
+    /// filesystem crawl runs either way, so turning this off costs speed but never
+    /// completeness.
+    /// </summary>
+    public bool UseWindowsIndex { get; set; } = true;
+
+    /// <summary>
     /// Whether hidden and system items are listed. Global rather than per folder,
     /// matching how Explorer treats it: it is a statement about how you want to
     /// work, not about one location.
@@ -23,11 +30,25 @@ public sealed class SettingsData
     public bool ShowHiddenItems { get; set; }
 
     /// <summary>
+    /// Whether a tag or folder-type query is answered from the saved indexes rather
+    /// than the current listing. Global for the same reason as the two above: it
+    /// describes how you want to search, not where you happen to be standing.
+    /// </summary>
+    public bool SearchEverywhere { get; set; }
+
+    /// <summary>
     /// Chosen detail columns per folder. Explorer works this way too: which columns
     /// are useful is a property of what is in this particular folder, not of the
     /// whole machine.
     /// </summary>
     public Dictionary<string, List<string>> FolderColumns { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Resized details columns per folder. Width is deliberately separate from the
+    /// selected-column list so an older settings file stays compatible and hiding a
+    /// column does not make it forget the width you gave it.
+    /// </summary>
+    public Dictionary<string, Dictionary<string, double>> FolderColumnWidths { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Chosen detail columns per view profile, not per folder. Columns describe the
@@ -112,6 +133,12 @@ public static class SettingsService
                     loaded.FolderViewProfiles = new Dictionary<string, string>(loaded.FolderViewProfiles ?? [], StringComparer.OrdinalIgnoreCase);
                     loaded.ProfileColumns = new Dictionary<string, List<string>>(loaded.ProfileColumns ?? [], StringComparer.OrdinalIgnoreCase);
                     loaded.FolderColumns = new Dictionary<string, List<string>>(loaded.FolderColumns ?? [], StringComparer.OrdinalIgnoreCase);
+                    loaded.FolderColumnWidths = new Dictionary<string, Dictionary<string, double>>(
+                        (loaded.FolderColumnWidths ?? [])
+                            .Select(pair => new KeyValuePair<string, Dictionary<string, double>>(
+                                pair.Key,
+                                new Dictionary<string, double>(pair.Value ?? [], StringComparer.OrdinalIgnoreCase))),
+                        StringComparer.OrdinalIgnoreCase);
                     loaded.SidebarOverrides = new Dictionary<string, string>(loaded.SidebarOverrides, StringComparer.OrdinalIgnoreCase);
                     loaded.PinnedDirectories = new Dictionary<string, string>(loaded.PinnedDirectories, StringComparer.OrdinalIgnoreCase);
                     loaded.PinnedCategories ??= [];
@@ -203,6 +230,17 @@ public static class SettingsService
         Save();
     }
 
+    public static bool GetUseWindowsIndex() => Current.UseWindowsIndex;
+
+    public static void SetUseWindowsIndex(bool value)
+    {
+        if (Current.UseWindowsIndex == value)
+            return;
+
+        Current.UseWindowsIndex = value;
+        Save();
+    }
+
     public static bool GetShowHiddenItems() => Current.ShowHiddenItems;
 
     public static void SetShowHiddenItems(bool value)
@@ -211,6 +249,17 @@ public static class SettingsService
             return;
 
         Current.ShowHiddenItems = value;
+        Save();
+    }
+
+    public static bool GetSearchEverywhere() => Current.SearchEverywhere;
+
+    public static void SetSearchEverywhere(bool value)
+    {
+        if (Current.SearchEverywhere == value)
+            return;
+
+        Current.SearchEverywhere = value;
         Save();
     }
 
@@ -234,8 +283,42 @@ public static class SettingsService
 
     public static void ClearFolderColumns(string folder)
     {
-        if (Current.FolderColumns.Remove(folder))
+        var changed = Current.FolderColumns.Remove(folder);
+        changed |= Current.FolderColumnWidths.Remove(folder);
+        if (changed)
             Save();
+    }
+
+    /// <summary>Saved width for one details column in one folder.</summary>
+    public static double? GetFolderColumnWidth(string folder, string columnId)
+        => Current.FolderColumnWidths.TryGetValue(folder, out var widths) &&
+           widths.TryGetValue(columnId, out var width) &&
+           !double.IsNaN(width) && !double.IsInfinity(width) && width > 0
+            ? width
+            : null;
+
+    /// <summary>
+    /// Records the finished size of a user-resized details column. The caller only
+    /// invokes this at the end of a drag, rather than writing settings for every
+    /// pixel the resize thumb moves through.
+    /// </summary>
+    public static void SetFolderColumnWidth(string folder, string columnId, double width)
+    {
+        if (string.IsNullOrWhiteSpace(folder) || string.IsNullOrWhiteSpace(columnId) ||
+            double.IsNaN(width) || double.IsInfinity(width) || width <= 0)
+            return;
+
+        if (!Current.FolderColumnWidths.TryGetValue(folder, out var widths))
+        {
+            widths = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+            Current.FolderColumnWidths[folder] = widths;
+        }
+
+        if (widths.TryGetValue(columnId, out var saved) && Math.Abs(saved - width) < .5)
+            return;
+
+        widths[columnId] = width;
+        Save();
     }
 
     /// <summary>Saved column ids for a profile, or null when it has never been set.</summary>
@@ -433,6 +516,9 @@ public static class SettingsService
     [
         ("files", "Your files"),
         ("favorites", "Favorites"),
+        // Rendered only when a provider is actually signed in, so a machine with
+        // no OneDrive never sees an empty heading.
+        ("cloud", "Cloud"),
         ("this-pc", "This PC"),
         ("network", "Network")
     ];

@@ -285,6 +285,33 @@ public static class ThumbnailService
     {
         var path = item.FullPath;
 
+        // A dehydrated cloud file has no bytes on this machine. Decoding it, or
+        // asking a shell thumbnail provider for it, makes the sync engine download
+        // the whole file first — so scrolling one grid of an online-only Pictures
+        // folder would quietly pull gigabytes over the network and fill the disk
+        // the user was trying to keep free.
+        //
+        // SIIGBF_INCACHEONLY is the guard: it returns a preview if Windows already
+        // has one and fails rather than fetching. Anything else falls back to the
+        // type icon, which is what Explorer shows for these files too.
+        if (item.IsOnlineOnly && !item.IsFolder)
+        {
+            var cachedPreview = ExtractShellImage(
+                path,
+                size,
+                NativeMethods.SIIGBF_THUMBNAILONLY |
+                NativeMethods.SIIGBF_INCACHEONLY |
+                NativeMethods.SIIGBF_BIGGERSIZEOK);
+
+            if (cachedPreview is not null)
+                return cachedPreview;
+
+            return GetShellIcon(item, size)
+                ?? (MediaTypes.IsVideo(item.Extension)
+                    ? ScalableIconService.Video
+                    : ScalableIconService.File(item.Extension));
+        }
+
         // Explorer's folder tiles are not just an enlarged 16px folder glyph: when
         // useful content exists inside, they are a composed preview. Build the same
         // kind of high-resolution preview ourselves so it is crisp at any tile size.

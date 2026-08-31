@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -16,7 +17,7 @@ namespace Clearspace;
 
 public partial class MainWindow : Window
 {
-    private readonly MainViewModel _viewModel = new();
+    private readonly MainViewModel _viewModel = new(App.IsDemoMode);
     private FileSystemItem? _renameTarget;
     private SidebarEntry? _sidebarDragEntry;
     private Button? _sidebarDragSource;
@@ -26,11 +27,20 @@ public partial class MainWindow : Window
     private Point _viewerPanOrigin;
     private double _viewerPanHorizontalOffset;
     private double _viewerPanVerticalOffset;
+    private readonly Dictionary<GridViewColumn, string> _columnIds = [];
+    private GridViewColumnHeader? _columnDragHeader;
+    private Point _columnDragStart;
+    private bool _isColumnDragging;
+    private bool _suppressColumnSort;
 
     public MainWindow()
     {
         InitializeComponent();
         DataContext = _viewModel;
+
+        // An elevated instance says so in the title bar. Two Clearspace windows
+        // with different rights are otherwise indistinguishable on the taskbar.
+        Title = App.IsDemoMode ? "Clearspace — Demo" : _viewModel.WindowTitle;
 
         // The view supplies the few behaviours actions cannot reach on their own.
         _viewModel.Context.SelectAll = () => FileList.SelectAll();
@@ -57,6 +67,14 @@ public partial class MainWindow : Window
         DependencyPropertyDescriptor
             .FromProperty(ListView.ViewProperty, typeof(ListView))
             .AddValueChanged(FileList, (_, _) => ApplyColumns());
+
+        // GridView supports a real resize thumb but not Explorer-style column
+        // reordering. These handlers supply both, while saving only after the user
+        // has finished the resize or drop gesture.
+        FileList.AddHandler(Thumb.DragCompletedEvent, new DragCompletedEventHandler(OnColumnResizeCompleted), true);
+        FileList.AddHandler(UIElement.PreviewMouseLeftButtonDownEvent, new MouseButtonEventHandler(OnColumnHeaderMouseDown), true);
+        FileList.AddHandler(UIElement.PreviewMouseMoveEvent, new MouseEventHandler(OnColumnHeaderMouseMove), true);
+        FileList.AddHandler(UIElement.PreviewMouseLeftButtonUpEvent, new MouseButtonEventHandler(OnColumnHeaderMouseUp), true);
     }
 
     // ---------- Columns ----------
@@ -72,6 +90,7 @@ public partial class MainWindow : Window
         if (FileList.View is not GridView view)
             return;
 
+        _columnIds.Clear();
         view.Columns.Clear();
 
         foreach (var id in _viewModel.VisibleColumns)
@@ -81,8 +100,95 @@ public partial class MainWindow : Window
                 continue;
 
             if (TryFindResource(info.ResourceKey) is GridViewColumn column)
+            {
+                var savedWidth = _viewModel.GetColumnWidth(id);
+                if (savedWidth is not null)
+                    column.Width = savedWidth.Value;
+
+                _columnIds[column] = id;
                 view.Columns.Add(column);
+            }
         }
+    }
+
+    private void OnColumnResizeCompleted(object sender, DragCompletedEventArgs e)
+    {
+        if (e.OriginalSource is not Thumb thumb ||
+            FindAncestor<GridViewColumnHeader>(thumb) is not { Column: { } column } ||
+            !_columnIds.TryGetValue(column, out var id))
+            return;
+
+        _viewModel.SaveColumnWidth(id, column.Width);
+    }
+
+    private void OnColumnHeaderMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (FindAncestor<Thumb>(e.OriginalSource as DependencyObject) is not null ||
+            FindAncestor<GridViewColumnHeader>(e.OriginalSource as DependencyObject) is not { Column: { } column } header ||
+            !_columnIds.ContainsKey(column))
+            return;
+
+        _columnDragHeader = header;
+        _columnDragStart = e.GetPosition(FileList);
+        _isColumnDragging = false;
+    }
+
+    private void OnColumnHeaderMouseMove(object sender, MouseEventArgs e)
+    {
+        if (_columnDragHeader is null || e.LeftButton != MouseButtonState.Pressed)
+            return;
+
+        var point = e.GetPosition(FileList);
+        if (!_isColumnDragging &&
+            Math.Abs(point.X - _columnDragStart.X) < SystemParameters.MinimumHorizontalDragDistance)
+            return;
+
+        _isColumnDragging = true;
+        _columnDragHeader.Opacity = .55;
+        Mouse.OverrideCursor = Cursors.SizeWE;
+        e.Handled = true;
+    }
+
+    private void OnColumnHeaderMouseUp(object sender, MouseButtonEventArgs e)
+    {
+        var source = _columnDragHeader;
+        var wasDragging = _isColumnDragging;
+        ResetColumnHeaderDrag();
+
+        if (!wasDragging || source?.Column is null || FileList.View is not GridView view)
+            return;
+
+        var target = FindAncestor<GridViewColumnHeader>(FileList.InputHitTest(e.GetPosition(FileList)) as DependencyObject);
+        if (target?.Column is null || target == source)
+            return;
+
+        var sourceIndex = view.Columns.IndexOf(source.Column);
+        var targetIndex = view.Columns.IndexOf(target.Column);
+        if (sourceIndex < 0 || targetIndex < 0)
+            return;
+
+        var dropAfter = e.GetPosition(target).X > target.ActualWidth / 2;
+        var insertIndex = targetIndex + (dropAfter ? 1 : 0);
+        view.Columns.RemoveAt(sourceIndex);
+        if (sourceIndex < insertIndex)
+            insertIndex--;
+        view.Columns.Insert(Math.Clamp(insertIndex, 0, view.Columns.Count), source.Column);
+
+        _viewModel.SaveColumnOrder(view.Columns
+            .Where(column => _columnIds.ContainsKey(column))
+            .Select(column => _columnIds[column]));
+        _suppressColumnSort = true;
+        e.Handled = true;
+    }
+
+    private void ResetColumnHeaderDrag()
+    {
+        if (_columnDragHeader is not null)
+            _columnDragHeader.Opacity = 1;
+
+        _columnDragHeader = null;
+        _isColumnDragging = false;
+        Mouse.OverrideCursor = null;
     }
 
     private void OnColumnsButtonClick(object sender, RoutedEventArgs e)
@@ -95,6 +201,18 @@ public partial class MainWindow : Window
     }
 
     private void OnResetColumns(object sender, RoutedEventArgs e) => _viewModel.ResetColumns();
+
+    // ---------- Elevation and cloud files ----------
+
+    private void OnOpenElevated(object sender, RoutedEventArgs e) => _viewModel.OpenCurrentElevated();
+
+    private async void OnKeepOnDevice(object sender, RoutedEventArgs e)
+        => await _viewModel.SetCloudPinStateAsync(pinned: true);
+
+    private async void OnFreeUpSpace(object sender, RoutedEventArgs e)
+        => await _viewModel.SetCloudPinStateAsync(pinned: false);
+
+    private void OnOpenIndexingOptions(object sender, RoutedEventArgs e) => _viewModel.OpenIndexingOptions();
 
     // ---------- Tags ----------
 
@@ -204,7 +322,7 @@ public partial class MainWindow : Window
         HookColumnHeaders();
         ApplyColumns();
 
-        _viewModel.Start();
+        _viewModel.Start(App.StartupPath);
         FileList.Focus();
     }
 
@@ -1248,6 +1366,15 @@ public partial class MainWindow : Window
 
     private void OnColumnHeaderClick(object sender, RoutedEventArgs e)
     {
+        // Releasing a dragged header also raises Click. A reorder must never turn
+        // into an unexpected sort immediately afterwards.
+        if (_suppressColumnSort)
+        {
+            _suppressColumnSort = false;
+            e.Handled = true;
+            return;
+        }
+
         if (e.OriginalSource is not GridViewColumnHeader { Content: string header })
             return;
 

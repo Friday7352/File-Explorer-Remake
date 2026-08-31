@@ -1,5 +1,8 @@
+using System.ComponentModel;
 using System.IO;
+using System.Runtime.InteropServices;
 using Clearspace.Models;
+using Clearspace.Services;
 
 namespace Clearspace.Native;
 
@@ -20,6 +23,11 @@ internal static class DirectoryEnumerator
     {
         var pattern = Path.Combine(directory, "*");
 
+        // Resolved once for the whole directory. Sync membership is a property of
+        // the location, so asking per item would repeat the same string comparison
+        // a hundred thousand times in a large folder for one identical answer.
+        var inCloudRoot = CloudStorageService.IsCloudPath(directory);
+
         using var handle = NativeMethods.FindFirstFileExW(
             pattern,
             NativeMethods.FINDEX_INFO_LEVELS.FindExInfoBasic,
@@ -29,7 +37,18 @@ internal static class DirectoryEnumerator
             NativeMethods.FIND_FIRST_EX_LARGE_FETCH);
 
         if (handle.IsInvalid)
-            yield break;
+        {
+            // GetLastWin32Error has to be read here, before anything else runs on
+            // this thread. Silently yielding nothing was the old behaviour, and it
+            // is why a protected folder such as System Volume Information looked
+            // like an ordinary empty one instead of a folder we were refused.
+            var error = Marshal.GetLastWin32Error();
+
+            if (error is NativeMethods.ERROR_FILE_NOT_FOUND or NativeMethods.ERROR_NO_MORE_FILES)
+                yield break;
+
+            throw Translate(error, directory);
+        }
 
         do
         {
@@ -44,7 +63,7 @@ internal static class DirectoryEnumerator
                 (attributes & (FileAttributes.Hidden | FileAttributes.System)) != 0)
                 continue;
 
-            yield return FileSystemItem.FromFindData(directory, in data);
+            yield return FileSystemItem.FromFindData(directory, in data, inCloudRoot);
         }
         while (NativeMethods.FindNextFileW(handle, out data));
     }
@@ -108,8 +127,40 @@ internal static class DirectoryEnumerator
     public static int CountEntries(string directory, bool showHidden, CancellationToken cancellationToken)
     {
         var count = 0;
-        foreach (var _ in Enumerate(directory, showHidden, cancellationToken))
-            count++;
+
+        try
+        {
+            foreach (var _ in Enumerate(directory, showHidden, cancellationToken))
+                count++;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // A hint, not a listing. A folder we cannot read simply has no count.
+            return 0;
+        }
+
         return count;
     }
+
+    /// <summary>
+    /// Turns a find error into the managed exception the rest of the app already
+    /// handles, so callers keep catching UnauthorizedAccessException rather than
+    /// learning Win32 error numbers.
+    /// </summary>
+    private static Exception Translate(int error, string directory) => error switch
+    {
+        NativeMethods.ERROR_ACCESS_DENIED =>
+            new UnauthorizedAccessException($"Access to '{directory}' is denied."),
+        NativeMethods.ERROR_PATH_NOT_FOUND or NativeMethods.ERROR_INVALID_NAME =>
+            new DirectoryNotFoundException($"Could not find '{directory}'."),
+        NativeMethods.ERROR_NOT_READY =>
+            new IOException("The drive is not ready."),
+        NativeMethods.ERROR_BAD_NETPATH =>
+            new IOException("The network location is unavailable."),
+        _ => new IOException(new Win32Exception(error).Message, error)
+    };
 }

@@ -113,6 +113,44 @@ internal static class NativeMethods
     internal const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
     internal const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
 
+    // ---------- Cloud placeholder attributes ----------
+
+    /// <summary>
+    /// Files On-Demand state lives in file attributes, not in a separate API, and
+    /// none of these bits exist in System.IO.FileAttributes. They arrive free in
+    /// the find data we already read, so sync status costs no extra disk access.
+    ///
+    /// PINNED and UNPINNED are also writable: setting them is exactly what the
+    /// shell's "Always keep on this device" and "Free up space" commands do, and
+    /// what attrib +P / attrib +U do from a console. The sync engine watches for
+    /// the change and hydrates or dehydrates in the background.
+    /// </summary>
+    internal const uint FILE_ATTRIBUTE_PINNED = 0x00080000;
+    internal const uint FILE_ATTRIBUTE_UNPINNED = 0x00100000;
+    internal const uint FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x00040000;
+    internal const uint FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x00400000;
+    internal const uint FILE_ATTRIBUTE_OFFLINE = 0x00001000;
+
+    internal const uint INVALID_FILE_ATTRIBUTES = 0xFFFFFFFF;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    internal static extern uint GetFileAttributesW(string lpFileName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetFileAttributesW(string lpFileName, uint dwFileAttributes);
+
+    // ---------- Win32 error codes worth naming ----------
+
+    internal const int ERROR_FILE_NOT_FOUND = 2;
+    internal const int ERROR_PATH_NOT_FOUND = 3;
+    internal const int ERROR_ACCESS_DENIED = 5;
+    internal const int ERROR_INVALID_NAME = 123;
+    internal const int ERROR_NO_MORE_FILES = 18;
+    internal const int ERROR_NOT_READY = 21;
+    internal const int ERROR_BAD_NETPATH = 53;
+    internal const int ERROR_CANCELLED = 1223;
+
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
     internal static extern IntPtr SHGetFileInfoW(
         string pszPath,

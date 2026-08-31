@@ -46,6 +46,72 @@ public sealed class FileSystemItem : ObservableObject
 
     public bool IsImageFile => !IsFolder && MediaTypes.IsImage(Extension);
 
+    // ---------- Cloud sync ----------
+
+    /// <summary>
+    /// True when this item sits inside a provider's sync root. Resolved once per
+    /// directory by the enumerator rather than per row, since it is a property of
+    /// where the item lives.
+    /// </summary>
+    public bool IsInCloudRoot { get; init; }
+
+    /// <summary>
+    /// Files On-Demand state, read straight out of the attributes the enumerator
+    /// already has. No disk access, no shell call, no cost per row.
+    ///
+    /// Not everything inside a sync root carries the pin attributes. Folders in
+    /// particular often carry none at all, and a folder created before Files
+    /// On-Demand was switched on can have none either. An unmarked item inside a
+    /// root is on this device, so it reports that rather than leaving a blank cell
+    /// in the middle of a column where every neighbour has a status.
+    /// </summary>
+    public CloudSyncState CloudState
+    {
+        get
+        {
+            var state = CloudStorageService.Evaluate((uint)Attributes);
+
+            return state == CloudSyncState.None && IsInCloudRoot
+                ? CloudSyncState.Available
+                : state;
+        }
+    }
+
+    public bool IsCloudItem => CloudState != CloudSyncState.None;
+
+    /// <summary>True when opening this would make the provider download it first.</summary>
+    public bool IsOnlineOnly => CloudState == CloudSyncState.OnlineOnly;
+
+    public string CloudStatusGlyph => CloudState switch
+    {
+        CloudSyncState.OnlineOnly => "\uE753",      // Cloud
+        CloudSyncState.Available => "\uE73E",       // CheckMark
+        CloudSyncState.AlwaysAvailable => "\uE930", // Completed
+        _ => string.Empty
+    };
+
+    public string CloudStatusText => CloudState switch
+    {
+        CloudSyncState.OnlineOnly => "Online-only",
+        CloudSyncState.Available => "On this device",
+        CloudSyncState.AlwaysAvailable => "Always kept",
+        _ => string.Empty
+    };
+
+    // Palette discipline: sync status reuses colours the app already spends rather
+    // than introducing a fourth. Muted ink reads as absent, green as present, and
+    // the brass accent as deliberately held.
+    private static readonly Brush CloudRemoteBrush = Frozen(Color.FromRgb(156, 150, 141));
+    private static readonly Brush CloudLocalBrush = Frozen(Color.FromRgb(112, 178, 132));
+    private static readonly Brush CloudPinnedBrush = Frozen(Color.FromRgb(211, 161, 95));
+
+    public Brush CloudStatusBrush => CloudState switch
+    {
+        CloudSyncState.OnlineOnly => CloudRemoteBrush,
+        CloudSyncState.AlwaysAvailable => CloudPinnedBrush,
+        _ => CloudLocalBrush
+    };
+
     // ---------- Tags ----------
 
     private IReadOnlyList<TagDefinition> _tags = [];
@@ -226,7 +292,7 @@ public sealed class FileSystemItem : ObservableObject
     /// <summary>Grid-specific image with a crisp vector shown while previews load.</summary>
     public ImageSource? GridImage => _thumbnail ?? _gridPlaceholder ?? _icon;
 
-    internal static FileSystemItem FromFindData(string directory, in NativeMethods.WIN32_FIND_DATA data)
+    internal static FileSystemItem FromFindData(string directory, in NativeMethods.WIN32_FIND_DATA data, bool inCloudRoot = false)
     {
         var name = data.cFileName;
         var size = ((long)data.nFileSizeHigh << 32) | data.nFileSizeLow;
@@ -237,6 +303,7 @@ public sealed class FileSystemItem : ObservableObject
             FullPath = Path.Combine(directory, name),
             Attributes = data.dwFileAttributes,
             Size = size,
+            IsInCloudRoot = inCloudRoot,
             DateModified = ToDateTime(data.ftLastWriteTime),
             DateCreated = ToDateTime(data.ftCreationTime)
         };
@@ -271,6 +338,11 @@ public sealed class FileSystemItem : ObservableObject
             if (string.IsNullOrWhiteSpace(name))
                 name = path;
 
+            // This is how a redirected Desktop or Documents tile picks up its
+            // OneDrive badge: known folder resolution already returned the real
+            // location, which is inside the sync root.
+            var inCloudRoot = CloudStorageService.IsCloudPath(path);
+
             if (isFolder)
             {
                 var info = new DirectoryInfo(path);
@@ -279,6 +351,7 @@ public sealed class FileSystemItem : ObservableObject
                     Name = name,
                     FullPath = path,
                     Attributes = attributes,
+                    IsInCloudRoot = inCloudRoot,
                     DateModified = info.LastWriteTime,
                     DateCreated = info.CreationTime
                 };
@@ -291,6 +364,7 @@ public sealed class FileSystemItem : ObservableObject
                 FullPath = path,
                 Attributes = attributes,
                 Size = file.Length,
+                IsInCloudRoot = inCloudRoot,
                 DateModified = file.LastWriteTime,
                 DateCreated = file.CreationTime
             };

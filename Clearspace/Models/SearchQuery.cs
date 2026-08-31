@@ -216,6 +216,19 @@ public sealed class SearchQuery
                 return false;
         }
 
+        return MatchesStructural(item);
+    }
+
+    /// <summary>
+    /// Every filter except the name terms.
+    ///
+    /// Used for hits that arrived already matched, such as from the Windows index,
+    /// where a document may qualify because of its contents rather than its name.
+    /// Re-testing the name there would throw away exactly the results the index was
+    /// consulted for.
+    /// </summary>
+    public bool MatchesStructural(FileSystemItem item)
+    {
         if (Kind != SearchKind.Any && !MatchesKind(item))
             return false;
 

@@ -55,6 +55,25 @@
                 </GridViewColumn.CellTemplate>
             </GridViewColumn>
 
+        <!-- Sync state stays compact in the list; hovering the icon reveals the
+             wording without spending a whole column on repeated OneDrive text. -->
+        <GridViewColumn x:Key="Col.Status" x:Shared="False" Width="52" Header="Status">
+            <GridViewColumn.CellTemplate>
+                <DataTemplate>
+                    <StackPanel Orientation="Horizontal"
+                                Margin="10,0,0,0"
+                                VerticalAlignment="Center"
+                                ToolTip="{Binding CloudStatusText}">
+                        <TextBlock Text="{Binding CloudStatusGlyph}"
+                                   FontFamily="{StaticResource IconFont}"
+                                   FontSize="11"
+                                   VerticalAlignment="Center"
+                                   Foreground="{Binding CloudStatusBrush}" />
+                    </StackPanel>
+                </DataTemplate>
+            </GridViewColumn.CellTemplate>
+        </GridViewColumn>
+
         <GridViewColumn x:Key="Col.Type" x:Shared="False" Width="160" Header="Type">
                 <GridViewColumn.CellTemplate>
                     <DataTemplate>
@@ -311,6 +330,24 @@
                                Margin="4"
                                RenderOptions.BitmapScalingMode="HighQuality" />
 
+                        <!-- Sync badge, bottom left so it never collides with the
+                             photo button opposite. An online-only tile also has no
+                             real preview behind it, which is the point: the pixels
+                             are not on this machine either. -->
+                        <Border HorizontalAlignment="Left"
+                                VerticalAlignment="Bottom"
+                                Margin="6"
+                                Padding="5,2"
+                                CornerRadius="5"
+                                Background="#B3141312"
+                                ToolTip="{Binding CloudStatusText}"
+                                Visibility="{Binding IsCloudItem, Converter={StaticResource BoolToVisible}}">
+                            <TextBlock Text="{Binding CloudStatusGlyph}"
+                                       FontFamily="{StaticResource IconFont}"
+                                       FontSize="10"
+                                       Foreground="{Binding CloudStatusBrush}" />
+                        </Border>
+
                         <!-- The Photos folder type's one affordance: open the reel
                              without giving up ordinary double-click behaviour. -->
                         <Button Click="OnViewPhotoClick"
@@ -506,6 +543,17 @@
                               Margin="0,0,7,0"
                               IsChecked="{Binding SearchEverywhere}"
                               ToolTip="Search everywhere. Applies to tag: and type: queries, which are answered from saved data rather than by scanning disks." />
+                <ToggleButton Style="{StaticResource IconToggle}"
+                              Content="&#xE721;"
+                              Margin="0,0,1,0"
+                              IsChecked="{Binding UseWindowsIndex}"
+                              IsEnabled="{Binding IsWindowsIndexAvailable}"
+                              ToolTip="Use the Windows Search index for instant results, including text inside documents. The full scan still runs, so turning this off costs speed but never completeness." />
+                <Button Style="{StaticResource IconButton}"
+                        Content="&#xE713;"
+                        Margin="0,0,7,0"
+                        Click="OnOpenIndexingOptions"
+                        ToolTip="Open Windows indexing options" />
                 <Button x:Name="FolderProfileButton"
                         Click="OnFolderProfileButtonClick"
                         ToolTip="Choose a saved view for this folder"
@@ -724,8 +772,7 @@
                                     </Button.Style>
                                 </Button>
 
-                                <Button Content="{Binding DisplayName}"
-                                        Tag="{Binding Name}"
+                                <Button Tag="{Binding Name}"
                                         ToolTip="{Binding Path}"
                                         Click="OnSidebarClick"
                                         AllowDrop="True"
@@ -736,6 +783,26 @@
                                         DragLeave="OnSidebarDragLeave"
                                         DragOver="OnSidebarDragOver"
                                         Drop="OnSidebarDrop">
+                                    <!-- Name and sync mark together. Known Folder
+                                         Move puts Desktop and Documents inside
+                                         OneDrive while leaving them looking exactly
+                                         like the local folders they replaced, so
+                                         the row is the only place that can say so. -->
+                                    <Button.Content>
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="{Binding DisplayName}"
+                                                       VerticalAlignment="Center"
+                                                       TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Text="&#xE753;"
+                                                       Margin="7,0,0,0"
+                                                       FontFamily="{StaticResource IconFont}"
+                                                       FontSize="9.5"
+                                                       Opacity="0.75"
+                                                       VerticalAlignment="Center"
+                                                       ToolTip="{Binding CloudHint}"
+                                                       Visibility="{Binding IsCloudBacked, Converter={StaticResource BoolToVisible}}" />
+                                        </StackPanel>
+                                    </Button.Content>
                                     <Button.ContextMenu>
                                         <ContextMenu>
                                             <MenuItem Header="Change location…" Click="OnChangeSidebarLocation">
@@ -905,6 +972,14 @@
                                 <MenuItem Header="Delete" Command="{Binding DeleteCommand}" InputGestureText="Del" />
                                 <Separator />
                                 <MenuItem Header="Pin to sidebar" Click="OnPinDirectory" />
+                                <MenuItem Header="Always keep on this device"
+                                          IsEnabled="{Binding HasCloudSelection}"
+                                          Visibility="{Binding IsCloudFolder, Converter={StaticResource BoolToVisible}}"
+                                          Click="OnKeepOnDevice" />
+                                <MenuItem Header="Free up space"
+                                          IsEnabled="{Binding HasCloudSelection}"
+                                          Visibility="{Binding IsCloudFolder, Converter={StaticResource BoolToVisible}}"
+                                          Click="OnFreeUpSpace" />
                                 <!-- Built on open in code-behind. A submenu that mixes
                                      the live tag list with commands cannot be driven by
                                      ItemsSource, which owns the whole item collection.
@@ -947,6 +1022,58 @@
                         </ListView.ContextMenu>
                     </ListView>
 
+                    <!-- Access refused. This sits over the list rather than in the
+                         status bar because an empty list plus one grey line reads as
+                         an empty folder, which is exactly the confusion that made
+                         protected folders look broken. -->
+                    <Border Grid.Row="1"
+                            Background="{StaticResource Base}"
+                            BorderBrush="{StaticResource Line}"
+                            BorderThickness="1"
+                            CornerRadius="12"
+                            Padding="30,26"
+                            MaxWidth="430"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            Visibility="{Binding IsAccessDenied, Converter={StaticResource BoolToVisible}}">
+                        <StackPanel>
+                            <TextBlock Text="&#xE72E;"
+                                       FontFamily="{StaticResource IconFont}"
+                                       FontSize="20"
+                                       HorizontalAlignment="Center"
+                                       Foreground="{StaticResource Accent}" />
+
+                            <TextBlock Text="This folder is protected"
+                                       Margin="0,14,0,0"
+                                       FontFamily="{StaticResource DisplayFont}"
+                                       FontSize="19"
+                                       HorizontalAlignment="Center"
+                                       Foreground="{StaticResource Ink}" />
+
+                            <TextBlock Text="{Binding AccessDeniedPath}"
+                                       Margin="0,8,0,0"
+                                       FontFamily="{StaticResource MonoFont}"
+                                       FontSize="11"
+                                       TextAlignment="Center"
+                                       TextWrapping="Wrap"
+                                       Foreground="{StaticResource InkFaint}" />
+
+                            <TextBlock Margin="0,12,0,0"
+                                       FontSize="11.5"
+                                       TextAlignment="Center"
+                                       TextWrapping="Wrap"
+                                       Foreground="{StaticResource InkMuted}"
+                                       Text="Windows refused to list its contents. Opening a second window with administrator rights will usually work; a few system paths stay closed to every account." />
+
+                            <Button Content="Open as administrator"
+                                    Margin="0,18,0,0"
+                                    HorizontalAlignment="Center"
+                                    Style="{StaticResource ViewerTextButtonPrimary}"
+                                    Click="OnOpenElevated"
+                                    Visibility="{Binding CanRetryElevated, Converter={StaticResource BoolToVisible}}" />
+                        </StackPanel>
+                    </Border>
+
                     <Border Grid.Row="2"
                             BorderBrush="{StaticResource LineFaint}"
                             BorderThickness="0,1,0,0"
@@ -959,28 +1086,56 @@
                                        VerticalAlignment="Center"
                                        TextTrimming="CharacterEllipsis" />
 
-                            <!-- Stays put while the walk runs, so there is a steady
-                                 signal that more results are still arriving even as
-                                 the count on the left keeps changing. -->
-                            <Border HorizontalAlignment="Right"
-                                    VerticalAlignment="Center"
-                                    Background="{StaticResource AccentSoft}"
-                                    CornerRadius="5"
-                                    Padding="9,3"
-                                    Visibility="{Binding IsSearchingTree, Converter={StaticResource BoolToVisible}}">
-                                <StackPanel Orientation="Horizontal">
-                                    <TextBlock Text="&#xE721;"
-                                               FontFamily="{StaticResource IconFont}"
-                                               FontSize="10"
-                                               VerticalAlignment="Center"
-                                               Foreground="{StaticResource Accent}" />
-                                    <TextBlock Text="Searching…"
-                                               Margin="6,0,0,0"
-                                               FontSize="10.5"
-                                               VerticalAlignment="Center"
-                                               Foreground="{StaticResource Accent}" />
-                                </StackPanel>
-                            </Border>
+                            <StackPanel Orientation="Horizontal"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Center">
+
+                                <!-- Which account is behind this folder. Worth
+                                     naming rather than implying: a machine can hold
+                                     a personal account and a work tenant at once,
+                                     and a redirected Documents looks identical to
+                                     the local one it replaced. -->
+                                <Border Background="#14FFFFFF"
+                                        CornerRadius="5"
+                                        Padding="9,3"
+                                        Margin="0,0,8,0"
+                                        ToolTip="This folder is kept in sync"
+                                        Visibility="{Binding IsCloudFolder, Converter={StaticResource BoolToVisible}}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE753;"
+                                                   FontFamily="{StaticResource IconFont}"
+                                                   FontSize="10"
+                                                   VerticalAlignment="Center"
+                                                   Foreground="{StaticResource InkMuted}" />
+                                        <TextBlock Text="{Binding CloudRootName}"
+                                                   Margin="6,0,0,0"
+                                                   FontSize="10.5"
+                                                   VerticalAlignment="Center"
+                                                   Foreground="{StaticResource InkMuted}" />
+                                    </StackPanel>
+                                </Border>
+
+                                <!-- Stays put while the walk runs, so there is a steady
+                                     signal that more results are still arriving even as
+                                     the count on the left keeps changing. -->
+                                <Border Background="{StaticResource AccentSoft}"
+                                        CornerRadius="5"
+                                        Padding="9,3"
+                                        Visibility="{Binding IsSearchingTree, Converter={StaticResource BoolToVisible}}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="&#xE721;"
+                                                   FontFamily="{StaticResource IconFont}"
+                                                   FontSize="10"
+                                                   VerticalAlignment="Center"
+                                                   Foreground="{StaticResource Accent}" />
+                                        <TextBlock Text="Searching…"
+                                                   Margin="6,0,0,0"
+                                                   FontSize="10.5"
+                                                   VerticalAlignment="Center"
+                                                   Foreground="{StaticResource Accent}" />
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
                         </Grid>
                     </Border>
 

@@ -29,6 +29,7 @@ public static class ColumnCatalog
         new("datemodified", "Date modified", "Col.DateModified"),
         new("datecreated",  "Date created",  "Col.DateCreated"),
         new("tags",         "Tags",          "Col.Tags"),
+        new("status",       "Status",        "Col.Status"),
         new("type",         "Type",          "Col.Type"),
         new("size",         "Size",          "Col.Size")
     ];
@@ -39,12 +40,26 @@ public static class ColumnCatalog
     private static readonly string[] PhotosDefault = ["name", "datemodified", "type"];
     private static readonly string[] MusicDefault = ["play", "name", "artist", "album", "length", "datemodified"];
 
+    // Status earns its place only inside a sync root. Everywhere else the column
+    // would be a permanently blank strip, which is why it is not in the general
+    // default and is added by DefaultsFor instead.
+    private static readonly string[] CloudDefault = ["name", "status", "datemodified", "type"];
+
     public static IReadOnlyList<string> DefaultsFor(DirectoryViewProfile profile) => profile switch
     {
         DirectoryViewProfile.Music => MusicDefault,
         DirectoryViewProfile.Photos => PhotosDefault,
         _ => GeneralDefault
     };
+
+    /// <summary>
+    /// The starting columns for a folder, given whether it is inside a cloud
+    /// provider's sync root.
+    /// </summary>
+    public static IReadOnlyList<string> DefaultsFor(DirectoryViewProfile profile, bool isCloudFolder)
+        => isCloudFolder && profile is DirectoryViewProfile.General or DirectoryViewProfile.Automatic
+            ? CloudDefault
+            : DefaultsFor(profile);
 
     public static ColumnInfo? Find(string id)
         => All.FirstOrDefault(column => column.Id.Equals(id, StringComparison.OrdinalIgnoreCase));

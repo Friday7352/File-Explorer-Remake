@@ -10,9 +10,41 @@ public partial class App : Application
     private static string? _lastErrorSignature;
     private static DateTime _lastErrorAt;
 
+    /// <summary>
+    /// The folder named on the command line, if any. An elevated relaunch passes
+    /// the path that was refused, so the new window lands where you were instead
+    /// of making you navigate back through a folder you cannot read.
+    /// </summary>
+    public static string? StartupPath { get; private set; }
+
+    /// <summary>
+    /// Starts a self-contained sample workspace. It is intended for screenshots,
+    /// documentation, and trying the UI without exposing a person's files.
+    /// </summary>
+    public static bool IsDemoMode { get; private set; }
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        // --demo deliberately takes precedence over a path. The demo workspace is
+        // entirely synthetic and therefore never enumerates the user's drives.
+        IsDemoMode = e.Args.Any(argument =>
+            argument.Equals("--demo", StringComparison.OrdinalIgnoreCase) ||
+            argument.Equals("/demo", StringComparison.OrdinalIgnoreCase));
+
+        // One bare path, quoted by the launcher. Anything that is not an existing
+        // directory is ignored rather than reported: a stray argument should not
+        // greet the user with an error dialog.
+        if (!IsDemoMode && e.Args.Length > 0)
+        {
+            var candidate = e.Args.First(argument =>
+                !argument.Equals("--demo", StringComparison.OrdinalIgnoreCase) &&
+                !argument.Equals("/demo", StringComparison.OrdinalIgnoreCase)).Trim('"');
+
+            if (Directory.Exists(candidate))
+                StartupPath = candidate;
+        }
 
         // Several handlers in this app are async void (event signatures require it),
         // so an exception inside one would otherwise tear the process down with no

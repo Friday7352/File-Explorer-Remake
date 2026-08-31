@@ -54,6 +54,46 @@ keyboard layer and never needs editing.
 Files uses a Roslyn generator to remove even step 2. Worth doing once the shape of
 the command list settles.
 
+## Access and elevation
+
+Clearspace runs as the invoking user, and the manifest says `asInvoker`. Marking it
+`requireAdministrator` would make every folder readable and the app worse in three
+ways that are hard to walk back: UIPI blocks drag and drop from a normal-rights
+Explorer window into an elevated one, drive letters the user mapped are invisible
+to the elevated token, and every ordinary browsing session then runs with rights it
+does not need. Explorer runs unelevated for exactly these reasons.
+
+Instead, `DirectoryEnumerator` translates `ERROR_ACCESS_DENIED` into a real
+`UnauthorizedAccessException` (it used to `yield break`, which made a protected
+folder look identical to an empty one), `MainViewModel` records the refused path,
+and `ElevationService` launches a *second* process with `Verb = "runas"` pointed at
+that folder. Two processes, two tokens, and the everyday one stays unprivileged.
+
+Not every refusal is fixable by elevating. `System Volume Information` wants SYSTEM,
+and the compatibility junctions (`C:\Users\All Users`, `AppData\Local\Application
+Data`) carry a deny rule no token gets past. The banner hides its button when the
+current process is already elevated.
+
+## Cloud files
+
+OneDrive's Files On-Demand state is not an API call: it lives in file attributes
+(`PINNED`, `UNPINNED`, `RECALL_ON_DATA_ACCESS`), none of which exist in
+`System.IO.FileAttributes` but all of which survive the marshal into the
+`WIN32_FIND_DATA` the enumerator already reads. So a folder's entire sync status
+costs nothing beyond the listing that was happening anyway.
+
+`CloudStorageService` handles both halves. Discovery reads the registry rather than
+guessing at `%UserProfile%\OneDrive`: `Software\Microsoft\OneDrive\Accounts` for the
+friendly account names, then `Explorer\SyncRootManager`, which is the shell's own
+list and therefore picks up Dropbox, Google Drive, and iCloud for free. Pinning
+writes the attribute pair, which is what the shell's own menu items do and avoids a
+hard dependency on `cldapi.dll`.
+
+One trap worth remembering: touching a dehydrated file's *contents* makes the sync
+engine download it. `ThumbnailService` therefore adds `SIIGBF_INCACHEONLY` for
+online-only items, or scrolling one grid of an online-only Pictures folder would
+quietly pull gigabytes over the network.
+
 ## Layout
 
 ```

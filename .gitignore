@@ -4,6 +4,8 @@ obj/
 publish*/
 release/
 dist/
+installer-build/
+installer/Payload.zip
 
 # User-specific Visual Studio files
 *.user
