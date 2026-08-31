@@ -254,6 +254,24 @@ public static class TagService
         Save();
     }
 
+    /// <summary>
+    /// Carries a path's tag assignment over to its new location after a rename or
+    /// move. Without this, renaming a tagged file silently drops its tags: the
+    /// assignment map is keyed by the old path, which no longer exists.
+    /// </summary>
+    public static void MovePath(string oldPath, string newPath)
+    {
+        if (string.Equals(oldPath, newPath, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        if (!Current.Assignments.TryGetValue(oldPath, out var ids) || ids.Count == 0)
+            return;
+
+        Current.Assignments.Remove(oldPath);
+        Current.Assignments[newPath] = ids;
+        Save();
+    }
+
     public static void Unassign(string path, string tagId)
     {
         if (!Current.Assignments.TryGetValue(path, out var ids))

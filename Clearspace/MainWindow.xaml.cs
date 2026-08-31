@@ -22,6 +22,9 @@ public partial class MainWindow : Window
     private SidebarEntry? _sidebarDragEntry;
     private Button? _sidebarDragSource;
     private Point _sidebarDragStart;
+    private Point _fileDragStart;
+    private bool _isFileDragPending;
+    private ListViewItem? _fileDropTarget;
     private string? _editingCategoryId;
     private bool _isPanningViewer;
     private Point _viewerPanOrigin;
@@ -666,7 +669,12 @@ public partial class MainWindow : Window
 
     private void OnSidebarDragEnter(object sender, DragEventArgs e)
     {
-        if (sender is Button button && TryGetSidebarDrop(e, button, out _))
+        if (sender is not Button button)
+            return;
+
+        if (IsFileDropOnSidebar(e, button, out _))
+            ShowSidebarDropTarget(button, e);
+        else if (TryGetSidebarDrop(e, button, out _))
             ShowSidebarDropTarget(button, e);
     }
 
@@ -678,7 +686,7 @@ public partial class MainWindow : Window
 
     private void OnSidebarDragOver(object sender, DragEventArgs e)
     {
-        if (sender is Button button && TryGetSidebarDrop(e, button, out _))
+        if (sender is Button button && (IsFileDropOnSidebar(e, button, out _) || TryGetSidebarDrop(e, button, out _)))
         {
             ShowSidebarDropTarget(button, e);
             e.Effects = DragDropEffects.Move;
@@ -693,8 +701,34 @@ public partial class MainWindow : Window
 
     private void OnSidebarDrop(object sender, DragEventArgs e)
     {
-        if (sender is not Button button || !TryGetSidebarDrop(e, button, out var source) ||
-            button.DataContext is not SidebarEntry target)
+        if (sender is not Button button)
+            return;
+
+        // Dragging real files onto a pinned or known-folder row means "put these
+        // there" - the same thing dropping them onto that folder in the file list
+        // would mean, just reached from the sidebar instead of by navigating first.
+        if (IsFileDropOnSidebar(e, button, out var targetFolder))
+        {
+            ClearSidebarDropTarget(button);
+
+            var sourcePaths = (string[])e.Data.GetData(DataFormats.FileDrop)!;
+            var owner = _viewModel.Context.OwnerHandle;
+            var moveWithinSameDrive = sourcePaths.All(path =>
+                string.Equals(Path.GetPathRoot(path), Path.GetPathRoot(targetFolder), StringComparison.OrdinalIgnoreCase));
+
+            var succeeded = (e.KeyStates & DragDropKeyStates.ControlKey) != 0 || !moveWithinSameDrive
+                ? FileOperationService.Copy(sourcePaths, targetFolder!, owner)
+                : FileOperationService.Move(sourcePaths, targetFolder!, owner);
+
+            if (succeeded && targetFolder!.Equals(_viewModel.CurrentPath, StringComparison.OrdinalIgnoreCase))
+                _ = _viewModel.RefreshAsync();
+
+            e.Effects = DragDropEffects.Move;
+            e.Handled = true;
+            return;
+        }
+
+        if (!TryGetSidebarDrop(e, button, out var source) || button.DataContext is not SidebarEntry target)
             return;
 
         ClearSidebarDropTarget(button);
@@ -723,6 +757,26 @@ public partial class MainWindow : Window
             e.Effects = DragDropEffects.Move;
             e.Handled = true;
         }
+    }
+
+    /// <summary>
+    /// True when the drag carries real files (not a sidebar reorder) and the
+    /// hovered row is a real, currently reachable folder rather than a section
+    /// header, a category, or the "Pinned" placeholder row.
+    /// </summary>
+    private static bool IsFileDropOnSidebar(DragEventArgs e, Button targetButton, out string? targetFolder)
+    {
+        targetFolder = null;
+
+        if (!e.Data.GetDataPresent(DataFormats.FileDrop) ||
+            targetButton.DataContext is not SidebarEntry { IsHeader: false, IsCategory: false, IsPinnedRoot: false, IsSection: false } entry ||
+            string.IsNullOrWhiteSpace(entry.Path) ||
+            entry.Path.StartsWith("clearspace://", StringComparison.OrdinalIgnoreCase) ||
+            !Directory.Exists(entry.Path))
+            return false;
+
+        targetFolder = entry.Path;
+        return true;
     }
 
     private static bool TryGetSidebarDrop(DragEventArgs e, Button targetButton, out SidebarEntry source)
@@ -799,6 +853,175 @@ public partial class MainWindow : Window
 
         _viewModel.AdjustTileScale(e.Delta > 0 ? 0.10 : -0.10);
         e.Handled = true;
+    }
+
+    // ---------- Drag and drop, to and from Clearspace ----------
+    //
+    // Dragging out uses CF_HDROP (DataFormats.FileDrop), the one format every
+    // Windows app - Explorer, Outlook, a browser upload dialog - already knows
+    // how to accept. Dropping in reads the same format, so a drag from Explorer
+    // and a drag from Clearspace's own list land in exactly the same handler.
+
+    private void OnFileListPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        // Only arm a drag when the press actually lands on a row. A click on the
+        // empty area below the last item is the start of a rubber-band selection,
+        // not a drag, and must be left alone.
+        _isFileDragPending = FindAncestor<ListViewItem>(e.OriginalSource as DependencyObject) is not null;
+        _fileDragStart = e.GetPosition(FileList);
+    }
+
+    private void OnFileListPreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_isFileDragPending || e.LeftButton != MouseButtonState.Pressed)
+            return;
+
+        var point = e.GetPosition(FileList);
+        if (Math.Abs(point.X - _fileDragStart.X) < SystemParameters.MinimumHorizontalDragDistance &&
+            Math.Abs(point.Y - _fileDragStart.Y) < SystemParameters.MinimumVerticalDragDistance)
+            return;
+
+        _isFileDragPending = false;
+
+        var paths = _viewModel.Context.SelectedItems
+            .Where(item => !item.IsDriveRoot)
+            .Select(item => item.FullPath)
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .ToArray();
+
+        if (paths.Length == 0)
+            return;
+
+        var data = new DataObject(DataFormats.FileDrop, paths);
+        DragDrop.DoDragDrop(FileList, data, DragDropEffects.Copy | DragDropEffects.Move);
+    }
+
+    private void OnFileListDragOver(object sender, DragEventArgs e)
+    {
+        e.Effects = ResolveFileDropEffects(e, out _, out var targetRow);
+        HighlightFileDropTarget(targetRow, e.Effects != DragDropEffects.None);
+        e.Handled = true;
+    }
+
+    private void OnFileListDragLeave(object sender, DragEventArgs e) => ClearFileDropHighlight();
+
+    private void OnFileListDrop(object sender, DragEventArgs e)
+    {
+        ClearFileDropHighlight();
+
+        var effects = ResolveFileDropEffects(e, out var targetFolder, out _);
+        e.Handled = true;
+
+        if (effects == DragDropEffects.None || targetFolder is null)
+            return;
+
+        var sourcePaths = (string[])e.Data.GetData(DataFormats.FileDrop)!;
+        var owner = _viewModel.Context.OwnerHandle;
+
+        var succeeded = effects == DragDropEffects.Copy
+            ? FileOperationService.Copy(sourcePaths, targetFolder, owner)
+            : FileOperationService.Move(sourcePaths, targetFolder, owner);
+
+        if (succeeded)
+            _ = _viewModel.RefreshAsync();
+    }
+
+    /// <summary>
+    /// Where a drop would land, and what it would do. Shared by DragOver (to show
+    /// the right cursor and highlight) and Drop (to actually act), so the two can
+    /// never disagree about whether a drop is allowed.
+    /// </summary>
+    private DragDropEffects ResolveFileDropEffects(DragEventArgs e, out string? targetFolder, out ListViewItem? targetRow)
+    {
+        targetFolder = null;
+        targetRow = null;
+
+        if (!e.Data.GetDataPresent(DataFormats.FileDrop))
+            return DragDropEffects.None;
+
+        if (e.Data.GetData(DataFormats.FileDrop) is not string[] { Length: > 0 } sourcePaths)
+            return DragDropEffects.None;
+
+        targetRow = FindAncestor<ListViewItem>(e.OriginalSource as DependencyObject);
+        targetFolder = targetRow?.DataContext is FileSystemItem { IsFolder: true } folder
+            ? folder.FullPath
+            : (string.IsNullOrWhiteSpace(_viewModel.CurrentPath) ||
+               _viewModel.CurrentPath.StartsWith("clearspace://", StringComparison.OrdinalIgnoreCase)
+                ? null
+                : _viewModel.CurrentPath);
+
+        if (targetFolder is null)
+            return DragDropEffects.None;
+
+        // A local copy, because an out parameter cannot be captured by the
+        // lambdas below.
+        var destination = targetFolder;
+
+        // Refuse a folder dropped onto itself or one of its own descendants -
+        // the shell would refuse it too, but silently, after the drop already
+        // looked accepted.
+        if (sourcePaths.Any(path => IsSameOrAncestorOf(path, destination)))
+            return DragDropEffects.None;
+
+        // Nothing to do if every source item already lives in the target folder.
+        if (sourcePaths.All(path =>
+                string.Equals(Path.GetDirectoryName(path), destination, StringComparison.OrdinalIgnoreCase)))
+            return DragDropEffects.None;
+
+        if ((e.KeyStates & DragDropKeyStates.ShiftKey) != 0)
+            return DragDropEffects.Move;
+
+        if ((e.KeyStates & DragDropKeyStates.ControlKey) != 0)
+            return DragDropEffects.Copy;
+
+        // No modifier held: match Explorer's own default - move within the same
+        // drive (cheap, a directory entry update), copy across drives (the source
+        // would otherwise vanish from a location the user may still want it).
+        var sameDrive = sourcePaths.All(path =>
+            string.Equals(Path.GetPathRoot(path), Path.GetPathRoot(destination), StringComparison.OrdinalIgnoreCase));
+
+        return sameDrive ? DragDropEffects.Move : DragDropEffects.Copy;
+    }
+
+    private static bool IsSameOrAncestorOf(string candidateAncestor, string path)
+    {
+        var normalizedAncestor = Path.TrimEndingDirectorySeparator(candidateAncestor);
+        var normalizedPath = Path.TrimEndingDirectorySeparator(path);
+
+        if (string.Equals(normalizedAncestor, normalizedPath, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return normalizedPath.StartsWith(
+            normalizedAncestor + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void HighlightFileDropTarget(ListViewItem? row, bool isAcceptable)
+    {
+        if (row is null || row.DataContext is not FileSystemItem { IsFolder: true } || !isAcceptable)
+        {
+            ClearFileDropHighlight();
+            return;
+        }
+
+        if (ReferenceEquals(_fileDropTarget, row))
+            return;
+
+        ClearFileDropHighlight();
+        _fileDropTarget = row;
+        row.Background = new SolidColorBrush(Color.FromArgb(45, 211, 161, 95));
+        row.BorderBrush = new SolidColorBrush(Color.FromRgb(211, 161, 95));
+        row.BorderThickness = new Thickness(1);
+    }
+
+    private void ClearFileDropHighlight()
+    {
+        if (_fileDropTarget is null)
+            return;
+
+        _fileDropTarget.ClearValue(BackgroundProperty);
+        _fileDropTarget.ClearValue(BorderBrushProperty);
+        _fileDropTarget.ClearValue(BorderThicknessProperty);
+        _fileDropTarget = null;
     }
 
     /// <summary>
@@ -1347,9 +1570,18 @@ public partial class MainWindow : Window
             return;
         }
 
-        FileOperationService.Rename(item.FullPath, Path.Combine(directory, newName), _viewModel.Context.OwnerHandle);
+        var destination = Path.Combine(directory, newName);
+        var succeeded = FileOperationService.Rename(item.FullPath, destination, _viewModel.Context.OwnerHandle);
         CancelRename();
-        _ = _viewModel.RefreshAsync();
+
+        if (succeeded)
+            // Updates the one row that changed instead of re-walking the whole
+            // folder - the difference that matters once it holds a lot of files.
+            _viewModel.ApplyRename(item, destination);
+        else
+            // The shell may have refused (name collision, a locked file); make sure
+            // the list still matches disk rather than showing a rename that failed.
+            _ = _viewModel.RefreshAsync();
     }
 
     private void CancelRename()

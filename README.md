@@ -2,6 +2,8 @@
 
 Clearspace is a modern Windows file manager built to be a comfortable replacement for File Explorer: familiar file operations, a calmer interface, and better ways to organize and find work.
 
+> **Work in progress:** Clearspace 1.0.0 is an early public release. There will be bugs and rough edges as it is used on more Windows setups and file collections. Please report issues you find; fixes and improvements will continue over time.
+
 ![Clearspace in the Desktop workspace](docs/images/desktop-demo.png)
 
 > The screenshot uses Clearspace Demo Mode. Every folder and file shown is fictional.

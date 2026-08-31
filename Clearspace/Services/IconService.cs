@@ -189,4 +189,21 @@ public static class IconService
         for (var i = 0; i < items.Count; i++)
             items[i].Icon = GetIcon(items[i]);
     }
+
+    /// <summary>
+    /// Pre-resolves the Details view's Type column for a whole listing.
+    ///
+    /// FileSystemItem.TypeName computes itself lazily on first read, which is fine
+    /// for a handful of rows but means the Type cell for each newly realized row
+    /// can trigger a fresh SHGetFileInfoW call exactly when it scrolls into view.
+    /// In a folder with many different file types that turns scrolling itself into
+    /// a source of shell calls. Doing it here, in a batch, up front and typically
+    /// off the UI thread, keeps every one of those calls out of the scroll path -
+    /// cheap either way, since the result is cached per extension, not per file.
+    /// </summary>
+    public static void PopulateTypeNames(IReadOnlyList<FileSystemItem> items)
+    {
+        for (var i = 0; i < items.Count; i++)
+            items[i].TypeName = GetTypeName(items[i]);
+    }
 }

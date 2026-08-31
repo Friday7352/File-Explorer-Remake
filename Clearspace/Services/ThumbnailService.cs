@@ -36,7 +36,13 @@ public static class ThumbnailService
         public required WeakReference<FileSystemItem> Owner { get; set; }
     }
 
-    private static readonly BlockingCollection<ThumbnailRequest> Queue = new(new ConcurrentQueue<ThumbnailRequest>());
+    // LIFO, deliberately. While scrolling, the requests worth serving are the
+    // newest ones - the tiles on screen right now. A queue serves the oldest
+    // first, which during a fast scroll through a large listing means decoding
+    // image after image for tiles that scrolled past seconds ago while the
+    // visible ones wait at the back. A stack reverses that, so the view fills in
+    // from where the user actually is.
+    private static readonly BlockingCollection<ThumbnailRequest> Queue = new(new ConcurrentStack<ThumbnailRequest>());
 
     // Decoded thumbnails are large and long-lived, so this is a hard-bounded LRU
     // rather than a plain dictionary. An unbounded cache here is the difference

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO;
 using System.Windows;
 using System.Windows.Media;
@@ -28,6 +29,17 @@ internal static class FolderIconService
         => ResolveKind(item) != FolderKind.Generic;
 
     /// <summary>
+    /// Badged folder images, keyed by the kind and the exact base image they were
+    /// composed from.
+    ///
+    /// The composition below is the same handful of geometries every time, and
+    /// every ordinary folder shares one cached Shell base image, so building a new
+    /// DrawingGroup per folder was pure waste - and it showed during a drive-wide
+    /// search, which asks for an icon for thousands of folders in a few seconds.
+    /// </summary>
+    private static readonly ConcurrentDictionary<(FolderKind Kind, ImageSource Base), ImageSource> BadgeCache = new();
+
+    /// <summary>
     /// Adds a compact type badge to a real Windows Shell folder image. The folder
     /// itself remains the one Windows draws; only the semantic mark is Clearspace.
     /// </summary>
@@ -36,6 +48,9 @@ internal static class FolderIconService
         var kind = ResolveKind(item);
         if (kind == FolderKind.Generic || baseIcon is null)
             return baseIcon;
+
+        if (BadgeCache.TryGetValue((kind, baseIcon), out var reused))
+            return reused;
 
         var drawing = new DrawingGroup();
         drawing.Children.Add(new ImageDrawing(baseIcon, new Rect(0, 0, 1, 1)));
@@ -66,6 +81,13 @@ internal static class FolderIconService
         drawing.Freeze();
         var image = new DrawingImage(drawing);
         image.Freeze();
+
+        // Bounded by kinds times the few base images in play (one shared list icon
+        // plus one per tile size), so this only grows if something unexpected does.
+        if (BadgeCache.Count > 64)
+            BadgeCache.Clear();
+
+        BadgeCache[(kind, baseIcon)] = image;
         return image;
     }
 
@@ -96,7 +118,16 @@ internal static class FolderIconService
         if (SamePath(item.FullPath, KnownFolders.Music)) return FolderKind.Music;
         if (SamePath(item.FullPath, KnownFolders.Videos)) return FolderKind.Videos;
 
-        return FolderKind.Generic;
+        // Nothing explicit and not a known Windows location: Automatic falls back
+        // to guessing from the folder's own name, so a custom "Family Photos" or
+        // "Band Practice Recordings" folder still gets a badge without the user
+        // having to set its type by hand.
+        return AutomaticFolderTypeDetector.DetectFromName(item.FullPath) switch
+        {
+            DirectoryViewProfile.Photos => FolderKind.Pictures,
+            DirectoryViewProfile.Music => FolderKind.Music,
+            _ => FolderKind.Generic
+        };
     }
 
     private static bool SamePath(string left, string right)

@@ -26,20 +26,36 @@ public static class WindowsSearchService
         "Provider=Search.CollatorDSO;Extended Properties=\"Application=Windows\"";
 
     private static bool? _available;
+    private static DateTime _lastUnavailableCheck = DateTime.MinValue;
+
+    /// <summary>
+    /// How long a failed check is trusted before trying again. The Windows Search
+    /// service can still be starting up when Clearspace launches, or can be
+    /// restarted while Clearspace stays open; caching "unavailable" forever meant
+    /// the "Use the Windows index" toggle stayed stuck off for the rest of the
+    /// session with no way back short of relaunching. A short cooldown costs one
+    /// cheap connection attempt every so often and fixes itself instead.
+    /// </summary>
+    private static readonly TimeSpan UnavailableRetryInterval = TimeSpan.FromSeconds(30);
 
     /// <summary>Result rows, kept minimal: the path is all the caller needs.</summary>
     public readonly record struct Hit(string Path, bool MatchedContents);
 
     /// <summary>
-    /// Whether the index can be queried at all. Cached, since a failure means the
-    /// service is off or the provider is missing and retrying will not help.
+    /// Whether the index can be queried at all. A success is cached for the rest
+    /// of the process, since that can only become stale in ways a relaunch already
+    /// handles. A failure is only cached briefly, so a service that was still
+    /// starting up (or was restarted mid-session) becomes usable again on its own.
     /// </summary>
     public static bool IsAvailable
     {
         get
         {
-            if (_available.HasValue)
-                return _available.Value;
+            if (_available == true)
+                return true;
+
+            if (_available == false && DateTime.UtcNow - _lastUnavailableCheck < UnavailableRetryInterval)
+                return false;
 
             try
             {
@@ -51,6 +67,7 @@ public static class WindowsSearchService
             {
                 Trace.WriteLine($"Clearspace: Windows Search unavailable. {exception.Message}");
                 _available = false;
+                _lastUnavailableCheck = DateTime.UtcNow;
             }
 
             return _available.Value;

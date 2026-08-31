@@ -68,7 +68,20 @@ internal static class FileSearchService
         {
             for (var i = 0; i < volume.Concurrency; i++)
             {
-                workers.Add(Task.Run(() => Work(volume), stopToken));
+                // LongRunning, not Task.Run, because every one of these workers
+                // spends its life blocked on a directory read or on the semaphore.
+                // Searching three drives at once asks for dozens of them, and taken
+                // from the shared thread pool they starve it: the pool grows only
+                // about one thread per second, so async continuations elsewhere in
+                // the app - icon batches, thumbnails, the next navigation - end up
+                // queued behind a crawl. LongRunning gives each its own thread and
+                // leaves the pool alone, which is what keeps the rest of the window
+                // responsive while a search runs.
+                workers.Add(Task.Factory.StartNew(
+                    () => Work(volume),
+                    stopToken,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default));
             }
         }
 

@@ -68,6 +68,18 @@ public sealed class MainViewModel : ObservableObject
             _searchDebounce.Stop();
             _ = RunTreeSearchAsync(_pendingQuery);
         };
+
+        // These three read their starting value straight into the backing field so
+        // the toggle shows the right state the instant the window appears. That
+        // means the property *setter* below never actually runs for whatever was
+        // true at launch, and with it skips whatever the setter is meant to do on
+        // a change - which is exactly the "shows on but does not work until you
+        // flip it off and on again" symptom, since flipping it is the first time
+        // the setter, and its side effects, ever fire. Re-applying the saved value
+        // here, through the property, makes startup behave like a fresh toggle.
+        SearchEverywhere = SettingsService.GetSearchEverywhere();
+        UseWindowsIndex = SettingsService.GetUseWindowsIndex();
+        ShowHiddenItems = SettingsService.GetShowHiddenItems();
     }
 
     public NavigationService Navigation { get; }
@@ -130,7 +142,7 @@ public sealed class MainViewModel : ObservableObject
     private void LoadColumns()
     {
         var profile = FolderProfile == DirectoryViewProfile.Automatic
-            ? DirectoryViewProfile.General
+            ? AutomaticFolderTypeDetector.DetectFromName(CurrentPath) ?? DirectoryViewProfile.General
             : FolderProfile;
 
         // This folder's own choice wins; otherwise fall back to what this kind of
@@ -267,7 +279,7 @@ public sealed class MainViewModel : ObservableObject
     /// and having to switch it back on at each launch is the kind of small tax
     /// that makes a setting feel like it does not work.
     /// </summary>
-    private bool _searchEverywhere = SettingsService.GetSearchEverywhere();
+    private bool _searchEverywhere;
     public bool SearchEverywhere
     {
         get => _searchEverywhere;
@@ -394,6 +406,11 @@ public sealed class MainViewModel : ObservableObject
             {
                 Context.CurrentPath = value;
                 OnPropertyChanged(nameof(Breadcrumbs));
+
+                // The Automatic label depends on the folder name, not just on the
+                // profile enum, so it needs a nudge even when FolderProfile itself
+                // stays Automatic across the navigation.
+                OnPropertyChanged(nameof(FolderProfileLabel));
             }
         }
     }
@@ -452,7 +469,12 @@ public sealed class MainViewModel : ObservableObject
         DirectoryViewProfile.Photos => "Photos",
         DirectoryViewProfile.Music => "Music",
         DirectoryViewProfile.Videos => "Videos",
-        _ => "Automatic"
+        _ => AutomaticFolderTypeDetector.DetectFromName(CurrentPath) switch
+        {
+            DirectoryViewProfile.Photos => "Automatic (Photos)",
+            DirectoryViewProfile.Music => "Automatic (Music)",
+            _ => "Automatic"
+        }
     };
 
     public bool IsAutomaticProfile => FolderProfile == DirectoryViewProfile.Automatic;
@@ -662,7 +684,7 @@ public sealed class MainViewModel : ObservableObject
         private set => SetProperty(ref _isLoading, value);
     }
 
-    private bool _useWindowsIndex = SettingsService.GetUseWindowsIndex();
+    private bool _useWindowsIndex;
     /// <summary>
     /// Consult the Windows Search index for instant results, including matches on
     /// text inside documents. The crawl runs regardless, so this trades nothing
@@ -691,7 +713,7 @@ public sealed class MainViewModel : ObservableObject
             StatusText = "Could not open Windows indexing options.";
     }
 
-    private bool _showHiddenItems = SettingsService.GetShowHiddenItems();
+    private bool _showHiddenItems;
     public bool ShowHiddenItems
     {
         get => _showHiddenItems;
@@ -897,6 +919,58 @@ public sealed class MainViewModel : ObservableObject
     }
 
     /// <summary>
+    /// Applies an already-completed shell rename to the matching row in place,
+    /// rather than re-enumerating the whole folder just to relabel one item.
+    ///
+    /// A full <see cref="RefreshAsync"/> after every rename used to be the only
+    /// option, and it walks the entire directory again (disk I/O, icon lookups,
+    /// a full resort) no matter how big the folder is. That is unnoticeable with
+    /// a few dozen files and a visible stutter with tens of thousands. This
+    /// mutates the one row that changed and re-splices it into the already-sorted
+    /// in-memory list, which is the same trick <see cref="Sort"/> already uses to
+    /// avoid a disk walk on every column click.
+    /// </summary>
+    public void ApplyRename(FileSystemItem item, string newFullPath)
+    {
+        var index = -1;
+        for (var i = 0; i < _directoryItems.Count; i++)
+        {
+            if (ReferenceEquals(_directoryItems[i], item))
+            {
+                index = i;
+                break;
+            }
+        }
+
+        if (index < 0)
+        {
+            // Not part of the folder currently on screen (or the snapshot has
+            // already moved on) - only a real reload can still be trusted here.
+            _ = RefreshAsync();
+            return;
+        }
+
+        TagService.MovePath(item.FullPath, newFullPath);
+        item.ApplyRename(newFullPath);
+
+        var reordered = _directoryItems.ToList();
+        reordered.RemoveAt(index);
+
+        var comparer = new ItemComparer(SortColumn, SortDescending);
+        var insertAt = reordered.FindIndex(existing => comparer.Compare(item, existing) < 0);
+        if (insertAt < 0)
+            insertAt = reordered.Count;
+
+        reordered.Insert(insertAt, item);
+
+        SetDirectoryItems(reordered);
+        if (!string.IsNullOrWhiteSpace(CurrentPath))
+            FolderSnapshotCache.Set(CurrentPath, reordered);
+
+        UpdateStatus();
+    }
+
+    /// <summary>
     /// Replaces the directory snapshot while preserving it as the source for
     /// instant search. The visible list may be a smaller filtered projection.
     /// </summary>
@@ -1037,6 +1111,17 @@ public sealed class MainViewModel : ObservableObject
     }
 
     /// <summary>
+    /// A progress sink that runs its callback on whichever thread reported to it.
+    /// <see cref="Progress{T}"/> always marshals to the thread that created it,
+    /// which is the right default for touching the UI and the wrong one for the
+    /// shell lookups a search batch needs doing first.
+    /// </summary>
+    private sealed class InlineProgress<T>(Action<T> handler) : IProgress<T>
+    {
+        public void Report(T value) => handler(value);
+    }
+
+    /// <summary>
     /// Walks everything beneath the current folder, reporting hits in batches so
     /// results appear while the walk is still running. A drive root can hold
     /// millions of entries, so this must never block the UI or run to completion
@@ -1058,9 +1143,41 @@ public sealed class MainViewModel : ObservableObject
         var seen = new HashSet<string>(found.Select(item => item.FullPath), StringComparer.OrdinalIgnoreCase);
         var timer = Stopwatch.StartNew();
         var capped = false;
+        var pendingPublish = false;
 
         IsSearchingTree = true;
 
+        // Results reach the list on a timer rather than on every batch.
+        //
+        // Assigning Items replaces the entire ItemsSource, and WPF answers that by
+        // throwing away every realized row and generating them again. The crawl
+        // flushes a batch every 128 hits or 200 ms, so a drive-wide search used to
+        // do that rebuild dozens of times - and each one also copied the whole
+        // result list, which at ten thousand hits is an 80 KB array per publish.
+        // Scrolling at the same time meant competing with a list that was being
+        // rebuilt underneath the scroll. Four publishes a second is still live,
+        // and costs a fraction of that.
+        var publishTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(250)
+        };
+
+        void Publish()
+        {
+            if (!pendingPublish || token.IsCancellationRequested)
+                return;
+
+            pendingPublish = false;
+            Items = found.ToArray();
+            StatusText = SearchEverywhere
+                ? $"Searching all drives… {found.Count:N0} found"
+                : $"Searching subfolders… {found.Count:N0} found";
+        }
+
+        publishTimer.Tick += (_, _) => Publish();
+        publishTimer.Start();
+
+        // Marshals to the UI thread, so it now does bookkeeping only.
         var progress = new Progress<IReadOnlyList<FileSystemItem>>(batch =>
         {
             if (token.IsCancellationRequested)
@@ -1075,13 +1192,20 @@ public sealed class MainViewModel : ObservableObject
                 // so the tag store is only ever read from one thread at a time.
                 item.RefreshTags();
                 found.Add(item);
+                pendingPublish = true;
             }
+        });
 
+        // Icons and type names are resolved on the crawl's own threads, before a
+        // batch is handed to the UI at all. Both go through the shell, and doing
+        // them in the UI callback (or worse, lazily, the first time a row scrolled
+        // into view) put a synchronous shell call in the middle of scrolling for
+        // every file type the search turned up.
+        var populatedProgress = new InlineProgress<IReadOnlyList<FileSystemItem>>(batch =>
+        {
             IconService.Populate(batch);
-            Items = found.ToArray();
-            StatusText = SearchEverywhere
-                ? $"Searching all drives… {found.Count:N0} found"
-                : $"Searching subfolders… {found.Count:N0} found";
+            IconService.PopulateTypeNames(batch);
+            ((IProgress<IReadOnlyList<FileSystemItem>>)progress).Report(batch);
         });
 
         // The index answers in milliseconds and already knows what is inside
@@ -1090,33 +1214,44 @@ public sealed class MainViewModel : ObservableObject
         {
             try
             {
-                var hits = await Task.Run(
-                    () => WindowsSearchService.Search(query, roots, MaxSearchResults, token),
-                    token);
-
-                var fromIndex = new List<FileSystemItem>(hits.Count);
-
-                foreach (var hit in hits)
+                // Turning a hit into a row costs several stat calls, and this used
+                // to run here, on the UI thread, once per hit: several thousand
+                // index results froze the window before any of them appeared. It
+                // belongs on the worker alongside the query itself.
+                var fromIndex = await Task.Run(() =>
                 {
-                    var item = FileSystemItem.FromLocation(hit.Path);
+                    var hits = WindowsSearchService.Search(query, roots, MaxSearchResults, token);
+                    var materialised = new List<FileSystemItem>(hits.Count);
 
-                    if (item is null)
-                        continue;
+                    foreach (var hit in hits)
+                    {
+                        token.ThrowIfCancellationRequested();
 
-                    // Structural filters only. These already matched by name or by
-                    // file contents, and a document containing a word will not have
-                    // that word in its filename.
-                    if (!query.MatchesStructural(item))
-                        continue;
+                        var item = FileSystemItem.FromLocation(hit.Path);
 
-                    fromIndex.Add(item);
-                }
+                        if (item is null)
+                            continue;
+
+                        // Structural filters only. These already matched by name or by
+                        // file contents, and a document containing a word will not have
+                        // that word in its filename.
+                        if (!query.MatchesStructural(item))
+                            continue;
+
+                        materialised.Add(item);
+                    }
+
+                    IconService.Populate(materialised);
+                    IconService.PopulateTypeNames(materialised);
+                    return materialised;
+                }, token);
 
                 if (fromIndex.Count > 0)
                     ((IProgress<IReadOnlyList<FileSystemItem>>)progress).Report(fromIndex);
             }
             catch (OperationCanceledException)
             {
+                publishTimer.Stop();
                 return;
             }
             catch (Exception)
@@ -1128,11 +1263,12 @@ public sealed class MainViewModel : ObservableObject
         try
         {
             capped = await Task.Run(
-                () => FileSearchService.Run(roots, showHidden, query.Matches, progress, MaxSearchResults, token),
+                () => FileSearchService.Run(roots, showHidden, query.Matches, populatedProgress, MaxSearchResults, token),
                 token);
         }
         catch (OperationCanceledException)
         {
+            publishTimer.Stop();
             return;
         }
         catch (Exception)
@@ -1149,8 +1285,20 @@ public sealed class MainViewModel : ObservableObject
             }
         }
 
+        publishTimer.Stop();
+
         if (token.IsCancellationRequested)
             return;
+
+        // Progress<T> posts its callbacks to the dispatcher, so the final batches
+        // can still be queued at this point. Publishing at a lower priority puts
+        // this behind all of them, which is what makes the last publish complete.
+        var dispatcher = Application.Current?.Dispatcher;
+
+        if (dispatcher is not null)
+            await dispatcher.InvokeAsync(Publish, DispatcherPriority.Background);
+        else
+            Publish();
 
         timer.Stop();
 
@@ -1194,6 +1342,7 @@ public sealed class MainViewModel : ObservableObject
 
         results.Sort(new ItemComparer(SortColumn.Name, descending: false));
         IconService.Populate(results);
+        IconService.PopulateTypeNames(results);
         ScalableIconService.PopulateGridPlaceholders(results);
         return results;
     }
@@ -1377,7 +1526,10 @@ public sealed class MainViewModel : ObservableObject
                         var firstBatch = list.ToList();
                         firstBatch.Sort(new ItemComparer(column, descending));
                         if (!gridFastPath)
+                        {
                             IconService.Populate(firstBatch);
+                            IconService.PopulateTypeNames(firstBatch);
+                        }
                         ScalableIconService.PopulateGridPlaceholders(firstBatch);
                         ApplyTags(firstBatch);
                         partialProgress.Report(firstBatch);
@@ -1387,7 +1539,10 @@ public sealed class MainViewModel : ObservableObject
 
                 list.Sort(new ItemComparer(column, descending));
                 if (!gridFastPath)
+                {
                     IconService.Populate(list);
+                    IconService.PopulateTypeNames(list);
+                }
                 ScalableIconService.PopulateGridPlaceholders(list);
                 ApplyTags(list);
                 return list;
@@ -1632,7 +1787,9 @@ public sealed class MainViewModel : ObservableObject
         }
 
         if (items.Count <= GridItemLimit &&
-            (KnownFolders.IsWithinPictures(path) || MediaTypes.LooksVisual(items)))
+            (KnownFolders.IsWithinPictures(path) ||
+             MediaTypes.LooksVisual(items) ||
+             AutomaticFolderTypeDetector.DetectFromName(path) == DirectoryViewProfile.Photos))
             return LayoutMode.Grid;
 
         return LayoutMode.Details;
@@ -1673,7 +1830,12 @@ public sealed class MainViewModel : ObservableObject
         if (missing.Length == 0)
             return;
 
-        var icons = await Task.Run(() => missing.Select(IconService.GetIcon).ToArray());
+        // Icons and type names are resolved together here, off the UI thread, for
+        // the same reason the initial load does: neither should be computed for
+        // the first time while a row is scrolling into view.
+        var resolved = await Task.Run(() => missing
+            .Select(item => (Icon: IconService.GetIcon(item), TypeName: IconService.GetTypeName(item)))
+            .ToArray());
         var dispatcher = Application.Current?.Dispatcher;
         if (dispatcher is null)
             return;
@@ -1681,7 +1843,10 @@ public sealed class MainViewModel : ObservableObject
         await dispatcher.InvokeAsync(() =>
         {
             for (var index = 0; index < missing.Length; index++)
-                missing[index].Icon = icons[index];
+            {
+                missing[index].Icon = resolved[index].Icon;
+                missing[index].TypeName = resolved[index].TypeName;
+            }
         });
     }
 

@@ -581,12 +581,8 @@
                             <MenuItem Header="Automatic" Tag="Automatic" Click="OnFolderProfileSelected" />
                             <MenuItem Header="General files" Tag="General" Click="OnFolderProfileSelected" />
                             <Separator />
-                            <MenuItem Header="Desktop" Tag="Desktop" Click="OnFolderProfileSelected" />
-                            <MenuItem Header="Documents" Tag="Documents" Click="OnFolderProfileSelected" />
-                            <MenuItem Header="Downloads" Tag="Downloads" Click="OnFolderProfileSelected" />
                             <MenuItem Header="Photos" Tag="Photos" Click="OnFolderProfileSelected" />
                             <MenuItem Header="Music" Tag="Music" Click="OnFolderProfileSelected" />
-                            <MenuItem Header="Videos" Tag="Videos" Click="OnFolderProfileSelected" />
                         </ContextMenu>
                     </Button.ContextMenu>
                 </Button>
@@ -930,6 +926,13 @@
                               MouseDoubleClick="OnItemDoubleClick"
                               PreviewMouseRightButtonDown="OnFileListRightClick"
                               PreviewMouseWheel="OnFileListMouseWheel"
+                              PreviewMouseLeftButtonDown="OnFileListPreviewMouseLeftButtonDown"
+                              PreviewMouseMove="OnFileListPreviewMouseMove"
+                              AllowDrop="True"
+                              DragEnter="OnFileListDragOver"
+                              DragOver="OnFileListDragOver"
+                              DragLeave="OnFileListDragLeave"
+                              Drop="OnFileListDrop"
                               VirtualizingPanel.IsVirtualizing="True"
                               VirtualizingPanel.VirtualizationMode="Recycling"
                               VirtualizingPanel.ScrollUnit="Pixel"
@@ -996,23 +999,11 @@
                                               Tag="General"
                                               Click="OnSelectedFolderProfile" />
                                     <Separator />
-                                    <MenuItem Header="Desktop"
-                                              Tag="Desktop"
-                                              Click="OnSelectedFolderProfile" />
-                                    <MenuItem Header="Documents"
-                                              Tag="Documents"
-                                              Click="OnSelectedFolderProfile" />
-                                    <MenuItem Header="Downloads"
-                                              Tag="Downloads"
-                                              Click="OnSelectedFolderProfile" />
                                     <MenuItem Header="Photos"
                                               Tag="Photos"
                                               Click="OnSelectedFolderProfile" />
                                     <MenuItem Header="Music"
                                               Tag="Music"
-                                              Click="OnSelectedFolderProfile" />
-                                    <MenuItem Header="Videos"
-                                              Tag="Videos"
                                               Click="OnSelectedFolderProfile" />
                                 </MenuItem>
                                 <MenuItem Header="Reset columns" Click="OnResetColumns" />

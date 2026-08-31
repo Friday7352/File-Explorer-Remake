@@ -11,9 +11,23 @@ namespace Clearspace.Models;
 /// </summary>
 public sealed class FileSystemItem : ObservableObject
 {
-    public required string Name { get; init; }
+    private string _name = string.Empty;
 
-    public required string FullPath { get; init; }
+    // Mutable (not init-only) so a rename can update the row in place instead of
+    // forcing a full re-enumeration of the folder just to relabel one item - the
+    // difference matters once a folder holds tens of thousands of entries.
+    public required string Name
+    {
+        get => _name;
+        set => SetProperty(ref _name, value);
+    }
+
+    private string _fullPath = string.Empty;
+    public required string FullPath
+    {
+        get => _fullPath;
+        set => SetProperty(ref _fullPath, value);
+    }
 
     public FileAttributes Attributes { get; init; }
 
@@ -387,6 +401,39 @@ public sealed class FileSystemItem : ObservableObject
         {
             return DateTime.MinValue;
         }
+    }
+
+    /// <summary>
+    /// Updates this row after a shell rename completes, instead of the caller
+    /// reloading the whole folder just to relabel one item. Icon and type name are
+    /// only recomputed when the extension changed (files) or always (folders,
+    /// since a folder's badge can depend on its name through Automatic
+    /// detection); size, dates, and attributes still describe the same file.
+    /// </summary>
+    internal void ApplyRename(string newFullPath)
+    {
+        var previousExtension = Extension;
+        var wasFolder = IsFolder;
+
+        Name = Path.GetFileName(newFullPath);
+        FullPath = newFullPath;
+
+        OnPropertyChanged(nameof(Extension));
+        OnPropertyChanged(nameof(DisplayTitle));
+        OnPropertyChanged(nameof(IsShortcut));
+        OnPropertyChanged(nameof(IsAudio));
+        OnPropertyChanged(nameof(IsImageFile));
+
+        if (wasFolder || !string.Equals(previousExtension, Extension, StringComparison.OrdinalIgnoreCase))
+        {
+            _typeName = null;
+            OnPropertyChanged(nameof(TypeName));
+            Icon = IconService.GetIcon(this);
+            Thumbnail = null;
+            GridPlaceholder = null;
+        }
+
+        RefreshTags();
     }
 
     public static string FormatSize(long bytes)
